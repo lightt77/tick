@@ -27,6 +27,12 @@ type Tray interface {
 	Update(st *store.State, now time.Time, sound string)
 }
 
+// Dash keeps the dashboard page's data file fresh. It is called every tick and
+// decides for itself whether anything needs writing.
+type Dash interface {
+	Update(st *store.State, now time.Time) error
+}
+
 // Daemon holds the loop's dependencies.
 type Daemon struct {
 	Store      *store.Store
@@ -34,6 +40,7 @@ type Daemon struct {
 	ConfigPath string
 	Player     alert.Player
 	Tray       Tray
+	Dash       Dash // optional
 	Now        func() time.Time
 
 	cfg      config.Config
@@ -153,6 +160,11 @@ func (d *Daemon) Step() error {
 	d.ringer.Reconcile(d.rings(st, now))
 	if d.Tray != nil {
 		d.Tray.Update(st, now, d.cfg.Sound)
+	}
+	if d.Dash != nil {
+		if err := d.Dash.Update(st, now); err != nil {
+			log.Printf("dashboard: %v", err)
+		}
 	}
 	return nil
 }

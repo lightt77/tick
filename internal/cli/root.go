@@ -19,6 +19,7 @@ import (
 	"github.com/lightt77/tick/internal/alert"
 	"github.com/lightt77/tick/internal/config"
 	"github.com/lightt77/tick/internal/daemon"
+	"github.com/lightt77/tick/internal/dashboard"
 	"github.com/lightt77/tick/internal/launchd"
 	"github.com/lightt77/tick/internal/ops"
 	"github.com/lightt77/tick/internal/paths"
@@ -96,7 +97,7 @@ Verbs: start (also resumes), pause, restart, cancel, skip (scheduled timers).`,
 		RunE:          a.runShortcut,
 	}
 	root.AddCommand(a.timerCmd(timer.KindTimer), a.timerCmd(timer.KindStopwatch),
-		a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd())
+		a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd(), a.dashboardCmd())
 	return root
 }
 
@@ -582,7 +583,8 @@ func (a *app) runDaemon(noTray bool) error {
 	log.SetFlags(log.LstdFlags)
 	s := store.New(paths.State(), paths.StateLock())
 	o := ops.Ops{Store: s, RunLog: paths.RunLog()}
-	d := &daemon.Daemon{Store: s, RunLog: paths.RunLog(), ConfigPath: paths.Config(), Player: alert.FromEnv()}
+	d := &daemon.Daemon{Store: s, RunLog: paths.RunLog(), ConfigPath: paths.Config(), Player: alert.FromEnv(),
+		Dash: &dashboard.Writer{StatePath: paths.State(), RunLogPath: paths.RunLog(), Out: paths.DashboardData(), PID: os.Getpid()}}
 	log.Printf("tick daemon started (pid %d, data %s)", os.Getpid(), paths.Data())
 
 	ctx, cancel := context.WithCancel(context.Background())

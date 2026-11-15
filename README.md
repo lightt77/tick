@@ -55,6 +55,22 @@ tick daemon --no-tray               # run in the foreground without the menu bar
   `config.toml`, keeping the rest of the file. A timer's own `--sound` still wins.
 - **Silence all** and **Quit tick** are at the bottom.
 
+### Dashboard
+
+```sh
+tick dashboard             # open the read-only page in your browser
+tick dashboard --no-open   # just write the files and print the path
+```
+
+A detailed, read-only view: what needs you, running and paused timers with live
+clocks, every schedule with its next time, the next 14 days in one agenda, and the
+last 14 days of done, missed and skipped runs as a strip per habit. It is a plain
+HTML file with no server. A `file://` page cannot read `state.json`, so the daemon
+keeps `dashboard-data.js` next to it (rewritten when something changes, plus every
+30 s), and the page reloads that file every 2 s and ticks the clocks itself. With no
+daemon running, `tick dashboard` writes one snapshot and the page says so. It
+follows the macOS light and dark setting.
+
 ### Scheduled reminders and habits
 
 A scheduled timer waits. When an occurrence arrives it becomes **due**: it rings
@@ -97,6 +113,7 @@ only by you:
 | `state.json` | all timers (CLI and daemon share it under an flock) |
 | `runs.jsonl` | one line per finished, skipped, missed or cancelled run: `ts, tag, amount, unit, note, outcome, kind` |
 | `config.toml` | optional settings, below |
+| `dashboard.html`, `dashboard-data.js` | the dashboard page and its data (your timer names and history; generated, safe to delete) |
 
 The daemon log is `~/Library/Logs/tick/daemon.log`. `TICK_HOME=<dir>` moves
 everything, which is useful for trials, and `TICK_ALERT=log` logs alerts instead of
@@ -133,6 +150,7 @@ internal/ops        verbs shared by the CLI and the menu
 internal/launchd    the LaunchAgent
 internal/cli        commands (cobra)
 internal/config     config.toml: load, defaults, SetSound
+internal/dashboard  data for the static dashboard page, its writer, the embedded page
 internal/paths      where files live (TICK_HOME override)
 sounds/             your own alert sounds (sounds_dir points here)
 ```

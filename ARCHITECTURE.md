@@ -73,6 +73,7 @@ tray menu clicks ───────┘        │                │   osascr
 | `alert` | Sounds, notifications, ring loops | The `Player` interface is swapped by tests and `TICK_ALERT=log`. |
 | `tray` | Menu bar | `view.go` is pure and tested; `tray.go` draws with `fyne.io/systray`; `policy_darwin.go` is cgo. |
 | `config` | `config.toml` | `Load` → `(Config, timer.Settings)`; `SetSound` rewrites a single line. |
+| `dashboard` | Data and writer for the static dashboard page | `Build` is pure; `Writer.Update` is called by the daemon each tick; `page.html` is embedded. |
 | `launchd` | LaunchAgent plist and `launchctl` | Label `local.tick.daemon`. |
 | `cli` | cobra commands, `--json` views, live view | `View` is the JSON contract for the LLM. |
 | `paths` | File locations | `TICK_HOME` moves everything. |
@@ -209,6 +210,42 @@ resume. That keeps RRULE work to about one call per occurrence.
   SIGTERM (launchd stop) leads to `systray.Quit()`, which leads to a clean exit.
   `--no-tray` skips systray entirely, for headless runs and tests.
 
+## Dashboard (`internal/dashboard`)
+
+A read-only page the user opens with `tick dashboard`. There is **no server**, by
+choice: no port, no auth, nothing to keep running.
+
+- **The constraint.** A page opened from `file://` can load a `<script src>` but
+  cannot `fetch` a file, and it cannot evaluate RRULEs. So the daemon writes
+  everything into `dashboard-data.js` (`window.TICK = {...};`) next to
+  `dashboard.html`, both in the data folder (outside the vault, 0600).
+- **The page** (`page.html`, vanilla JS/CSS, no network) re-injects a
+  `<script src="dashboard-data.js?t=…">` every 2 s and re-renders when
+  `generated_ms` changes. It draws the clocks itself every 250 ms from `ends_ms`
+  (running countdown), `started_ms` (running stopwatch: now minus elapsed) or the
+  fixed `remaining_ms`/`elapsed_ms` (paused). All data reaches the DOM through
+  `textContent`; a test fails if the page uses `innerHTML`.
+- **Everything the page can't compute is computed in Go** by `Build`: the next 14
+  days of occurrences (one `Schedule.Between` per timer, grouped by local day with
+  at most 6 times listed per timer per day, so an "every 20 minutes" rule stays
+  small) and the last 30 days of `runs.jsonl` (`runlog.Since`).
+- **`Writer.Update`** runs every 250 ms tick but starts with a cheap check (mtime
+  and size of `state.json` and `runs.jsonl`, and that the data file exists), so
+  quiet ticks write nothing. It writes on a change, as a 30 s heartbeat (which is
+  how the page tells "daemon stopped" from "quiet"), and when the file was deleted.
+  A failed write waits for the next heartbeat instead of retrying every tick.
+  Writes are temp file plus rename. Errors are logged, never returned from `Step`.
+- **Snapshot mode.** `tick dashboard` writes one snapshot (`source: "snapshot"`)
+  when no daemon is running, or the data file is missing or older than 90 s (an old
+  daemon binary never writes one). The page then says it is not updating.
+- **Read-only on purpose.** The tray and the CLI call `ops`; a page without a server
+  can't. Adding buttons or an `ask` box would need a local server (with an Origin
+  check and a token, since it would accept POSTs).
+- **Tested** without a browser: `dashboard_test.go` (states, agenda window and
+  grouping, writer skip/heartbeat/missing-file/failure, file format and mode, page
+  safety) and a daemon test that quiet ticks leave the data file alone. The page's
+  look and its 2 s reload were checked by hand in headless Chrome with synthetic data.
+
 ## Alerts (`internal/alert`)
 
 - **Sound:** `afplay -v <volume> <file>`, which blocks for one play. A ring loop
@@ -235,6 +272,8 @@ Data: `~/Library/Application Support/tick/` (0700 dir, 0600 files).
   as is.
 - `config.toml`: see the README. Keys: `sound`, `sounds_dir`, `volume`,
   `ring_interval`, `ring_cap`, `nag_interval`, `nag_count`, `grace`.
+- `dashboard.html`, `dashboard-data.js`: generated (see Dashboard). Safe to delete;
+  they come back with `tick dashboard` and the daemon.
 
 Logs: `~/Library/Logs/tick/daemon.log` (launchd's stdout and stderr).
 
@@ -254,7 +293,7 @@ LaunchAgent: `~/Library/LaunchAgents/local.tick.daemon.plist`
 - **Grammar:** `tick timer <name> [verb] [duration]`, `tick stopwatch <name> [verb]`,
   `tick timer list`, plus the shortcuts `tick <dur> start` (a repeating timer named
   `tick`) and `tick start|pause|restart|cancel` (that timer). Also `status`,
-  `silence`, `sounds`, and `daemon [install|uninstall|start] [--no-tray]`.
+  `silence`, `sounds`, `dashboard [--no-open]`, and `daemon [install|uninstall|start] [--no-tray]`.
 - **Creation flags** (`--rrule` (repeatable), `--at`, `--label`, `--sound`, `--grace`,
   `--repeat`, `--dry-run`) apply only when `start` creates a new name. On an
   existing name they are an error: "cancel it first".
@@ -344,6 +383,13 @@ its rule table. Every rule in it was dry-run against the real binary.
     the ledger as its own package, shipped inside tick at first.
   - The user's older `../productivity/timeledger` (SQLite) is related.
 - **Possible later:**
+  - `tick ask "…"`: a one-file agent loop over an API LLM (OpenRouter) that turns
+    plain language into `tick` commands. Parked on purpose; the user wants to use
+    tick for a few days first. Design notes: reuse `ticker.md` as the system prompt,
+    allow only `timer`, `stopwatch`, `silence`, `status`, `sounds`, enforce the
+    dry-run and the y/N for create and cancel in code rather than trusting the
+    model, and keep the API key in `~/Library/Application Support/tick/.env`
+    (outside the vault).
   - an MCP server wrapping the CLI
   - notification buttons (would need `alerter` or a signed native helper)
   - per-timer volume, or per-timer sound from the tray

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lightt77/tick/internal/dashboard"
 	"github.com/lightt77/tick/internal/ops"
 	"github.com/lightt77/tick/internal/runlog"
 	"github.com/lightt77/tick/internal/schedule"
@@ -186,6 +188,34 @@ func TestQuietTickWritesNothing(t *testing.T) {
 	after, _ := os.Stat(r.d.Store.Path)
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("a tick that changed nothing rewrote the state file")
+	}
+}
+
+func TestDashboardDataFollowsChangesOnly(t *testing.T) {
+	r := newRig(t)
+	out := filepath.Join(r.dir, "dashboard-data.js")
+	r.d.Dash = &dashboard.Writer{StatePath: r.d.Store.Path, RunLogPath: r.d.RunLog, Out: out}
+	r.ops.Create(timer.NewStopwatch("work", r.now))
+	r.step(t)
+	first, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("no data file after the first tick: %v", err)
+	}
+
+	time.Sleep(15 * time.Millisecond)
+	r.now = r.now.Add(time.Second)
+	r.step(t)
+	if again, _ := os.Stat(out); !again.ModTime().Equal(first.ModTime()) {
+		t.Fatal("a quiet tick rewrote the dashboard data")
+	}
+
+	time.Sleep(15 * time.Millisecond)
+	tea, _ := timer.NewCountdown("tea", 5*time.Minute, false, r.now)
+	r.ops.Create(tea)
+	r.step(t)
+	b, _ := os.ReadFile(out)
+	if !strings.Contains(string(b), `"name":"tea"`) {
+		t.Fatal("a timer made from the CLI did not reach the dashboard data")
 	}
 }
 

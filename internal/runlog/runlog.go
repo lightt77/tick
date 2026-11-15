@@ -4,7 +4,9 @@
 package runlog
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"time"
@@ -64,6 +66,30 @@ func Append(path string, entries ...Entry) error {
 		}
 	}
 	return nil
+}
+
+// Since reads the entries at or after from, oldest first. A missing file is an
+// empty log; lines that do not parse are skipped.
+func Since(path string, from time.Time) ([]Entry, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []Entry
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var e Entry
+		if json.Unmarshal(sc.Bytes(), &e) != nil || e.TS.Before(from) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, sc.Err()
 }
 
 // Events logs every event that is an outcome.

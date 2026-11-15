@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' file:">
+<title>tick</title>
+<style>
+:root {
+  --bg: #f6f5f2; --card: #ffffff; --text: #1d1c1a; --muted: #6b6862; --border: #e2dfd8;
+  --accent: #2d6cdf; --ok: #2e8b57; --bad: #c0392b; --warn: #b7791f; --bell: #d97706;
+  --track: #ebe8e1; --cell: #ebe8e1;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161513; --card: #1f1e1c; --text: #ecebe7; --muted: #9a968e; --border: #33312d;
+    --accent: #6ea0ff; --ok: #4cc38a; --bad: #ef6b5b; --warn: #e0a43a; --bell: #f59e0b;
+    --track: #2e2c29; --cell: #2e2c29;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
+h2 { margin: 28px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+h2 .n { font-weight: 400; margin-left: 6px; }
+.grow { flex: 1; }
+.now { color: var(--muted); }
+.chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; border: 1px solid var(--border); background: var(--card); }
+.chip.ok { color: var(--ok); border-color: var(--ok); }
+.chip.bad { color: var(--bad); border-color: var(--bad); }
+.chip.warn { color: var(--warn); border-color: var(--warn); }
+.banner { border: 1px solid var(--bell); background: var(--card); color: var(--bell); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.card.attn { border-color: var(--bell); }
+.top { display: flex; align-items: baseline; gap: 8px; }
+.name { font-weight: 650; overflow-wrap: anywhere; }
+.badge { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 0 5px; white-space: nowrap; }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.bell { color: var(--bell); border-color: var(--bell); }
+.sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.rules { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.clock { font-size: 30px; font-weight: 600; margin: 6px 0 2px; letter-spacing: .5px; }
+.clock.dim { color: var(--muted); }
+.bar { height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
+.bar > i { display: block; height: 100%; background: var(--accent); width: 0; }
+.row { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-size: 13px; }
+.row .l { color: var(--muted); }
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+tr:last-child td { border-bottom: 0; }
+.scroll { overflow-x: auto; }
+.scroll table { min-width: 560px; }
+.scroll td:first-child { min-width: 96px; }
+.days { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.day { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; min-width: 0; }
+.day h3 { margin: 0 0 6px; font-size: 14px; }
+.day h3 span { color: var(--muted); font-weight: 400; margin-left: 6px; }
+.item { display: flex; gap: 10px; padding: 2px 0; font-size: 14px; flex-wrap: wrap; }
+.item b { font-weight: 600; }
+.item .t { color: var(--muted); }
+.hist { display: grid; grid-template-columns: minmax(90px, 160px) auto 1fr; gap: 6px 12px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.cells { display: flex; gap: 3px; }
+.cell { width: 14px; height: 14px; border-radius: 3px; background: var(--cell); }
+.cell.done { background: var(--ok); }
+.cell.missed { background: var(--bad); }
+.cell.skipped { background: var(--warn); opacity: .55; }
+.cell.cancelled { background: transparent; border: 1.5px solid var(--muted); }
+.cell.today { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+.legend { color: var(--muted); font-size: 12px; margin-top: 8px; display: flex; gap: 12px; flex-wrap: wrap; }
+.legend .cell { display: inline-block; vertical-align: -2px; margin-right: 4px; width: 11px; height: 11px; }
+.done-t { color: var(--ok); } .missed-t { color: var(--bad); } .skipped-t { color: var(--warn); } .cancelled-t { color: var(--muted); }
+.empty { color: var(--muted); padding: 10px 2px; }
+@media (max-width: 560px) {
+  .hist { grid-template-columns: 1fr; }
+  .clock { font-size: 26px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>tick</h1>
+    <span id="status" class="chip">loading…</span>
+    <span class="grow"></span>
+    <span id="now" class="now"></span>
+  </header>
+  <div id="banner"></div>
+  <div id="content"></div>
+</main>
+<script>
+"use strict";
+var HIST_DAYS = 14;
+var live = [];
+var lastGen = null;
+var loadFailed = false;
+
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function pad(n) { return n < 10 ? "0" + n : "" + n; }
+function clock(ms) {
+  var s = Math.max(0, Math.floor(ms / 1000));
+  var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return (h ? h + ":" + pad(m) : pad(m)) + ":" + pad(s % 60);
+}
+function hhmm(ms) { var d = new Date(ms); return pad(d.getHours()) + ":" + pad(d.getMinutes()); }
+function dur(ms) {
+  var s = Math.round(ms / 1000), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
+  if (h) return h + "h" + (m ? m + "m" : "");
+  if (m) return m + "m" + (r ? r + "s" : "");
+  return r + "s";
+}
+function minutes(n) {
+  var m = Math.round(n);
+  return m >= 60 ? Math.floor(m / 60) + "h " + (m % 60) + "m" : m + "m";
+}
+function until(ms) {
+  var m = Math.floor(ms / 60000);
+  if (m < 1) return "in under a minute";
+  if (m < 60) return "in " + m + "m";
+  var h = Math.floor(m / 60);
+  if (h < 24) return "in " + h + "h " + (m % 60) + "m";
+  return "in " + Math.floor(h / 24) + "d " + (h % 24) + "h";
+}
+function dayStart(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function dayKey(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
+function dayLabel(d) { return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }); }
+function when(ms) {
+  var d = new Date(ms), t = new Date();
+  if (dayKey(d) === dayKey(t)) return "today " + hhmm(ms);
+  return dayLabel(d) + " " + hhmm(ms);
+}
+
+function section(parent, title, n) {
+  var h = el("h2", null, title);
+  if (n != null) h.appendChild(el("span", "n", String(n)));
+  parent.appendChild(h);
+}
+
+function card(t, attn) {
+  var c = el("div", "card" + (attn ? " attn" : ""));
+  var top = el("div", "top");
+  top.appendChild(el("span", "name", t.name));
+  top.appendChild(el("span", "badge", t.kind));
+  if (t.repeat) top.appendChild(el("span", "badge", "repeats"));
+  if (t.ringing) top.appendChild(el("span", "badge bell", "ringing"));
+  if (t.late) top.appendChild(el("span", "badge warn", "late"));
+  c.appendChild(top);
+  var note = t.label || t.describe;
+  if (note) c.appendChild(el("div", "sub", note));
+  return c;
+}
+
+function nextRow(c, t) {
+  if (t.next_ms == null) return;
+  var r = el("div", "row");
+  r.appendChild(el("span", "l", "next " + when(t.next_ms)));
+  var w = el("span", null, "");
+  r.appendChild(w);
+  c.appendChild(r);
+  live.push(function (now) { w.textContent = until(t.next_ms - now); });
+}
+
+function runningCard(t) {
+  var c = card(t, false);
+  var k = el("div", "clock", "");
+  c.appendChild(k);
+  if (t.kind === "stopwatch") {
+    live.push(function (now) { k.textContent = "↑" + clock(now - t.started_ms); });
+    return c;
+  }
+  var bar = el("div", "bar"), fill = el("i");
+  bar.appendChild(fill);
+  c.appendChild(bar);
+  var r = el("div", "row");
+  r.appendChild(el("span", "l", "of " + dur(t.duration_ms) + (t.repeat ? " · repeats" : "")));
+  var ends = el("span", null, "");
+  r.appendChild(ends);
+  c.appendChild(r);
+  live.push(function (now) {
+    var left = Math.max(0, t.ends_ms - now);
+    k.textContent = clock(left);
+    fill.style.width = (t.duration_ms ? 100 * (1 - left / t.duration_ms) : 0) + "%";
+    ends.textContent = "ends " + hhmm(t.ends_ms);
+  });
+  nextRow(c, t);
+  return c;
+}
+
+function pausedCard(t) {
+  var c = card(t, false);
+  var ms = t.kind === "stopwatch" ? t.elapsed_ms : t.remaining_ms;
+  c.appendChild(el("div", "clock dim", (t.kind === "stopwatch" ? "↑" : "") + clock(ms || 0)));
+  c.appendChild(el("div", "sub", t.kind === "stopwatch" ? "paused" : "paused · of " + dur(t.duration_ms)));
+  return c;
+}
+
+function attnCard(t) {
+  var c = card(t, true);
+  var msg = t.state === "due" ? "Due since " + hhmm(t.due_ms) : t.state === "done" ? "Finished" : "Ringing";
+  c.appendChild(el("div", "clock", msg));
+  if (t.duration_ms) c.appendChild(el("div", "sub", dur(t.duration_ms)));
+  nextRow(c, t);
+  return c;
+}
+
+function scheduledRows(tb, timers) {
+  timers.forEach(function (t) {
+    var tr = el("tr");
+    var a = el("td");
+    a.appendChild(el("div", "name", t.name));
+    if (t.label) a.appendChild(el("div", "sub", t.label));
+    tr.appendChild(a);
+    var b = el("td");
+    if (t.at_ms != null) b.appendChild(el("div", null, "once"));
+    (t.rules || []).forEach(function (r) { b.appendChild(el("div", "rules", r)); });
+    tr.appendChild(b);
+    tr.appendChild(el("td", null, t.duration_ms ? dur(t.duration_ms) : "reminder"));
+    var n = el("td");
+    if (t.suspended) {
+      n.appendChild(el("span", "badge warn", t.suspended_until_ms ? "paused until " + when(t.suspended_until_ms) : "paused"));
+    } else if (t.next_ms != null) {
+      n.appendChild(el("div", null, when(t.next_ms)));
+      var w = el("div", "sub", "");
+      n.appendChild(w);
+      live.push(function (now) { w.textContent = until(t.next_ms - now); });
+    } else {
+      n.appendChild(el("span", "sub", "no more"));
+    }
+    tr.appendChild(n);
+    tb.appendChild(tr);
+  });
+}
+
+function renderAgenda(root, d) {
+  var items = d.agenda || [];
+  section(root, "Next " + d.agenda_days + " days", items.length ? null : 0);
+  if (!items.length) { root.appendChild(el("div", "empty", "Nothing scheduled.")); return; }
+  var days = [], byDay = {};
+  items.forEach(function (it) {
+    if (!byDay[it.day]) { byDay[it.day] = []; days.push(it.day); }
+    byDay[it.day].push(it);
+  });
+  var today = dayKey(new Date()), tom = dayKey(new Date(Date.now() + 86400000));
+  var grid = el("div", "days");
+  days.forEach(function (day) {
+    var p = day.split("-"), box = el("div", "day"), h = el("h3", null, dayLabel(new Date(+p[0], +p[1] - 1, +p[2])));
+    if (day === today) h.appendChild(el("span", null, "today"));
+    else if (day === tom) h.appendChild(el("span", null, "tomorrow"));
+    box.appendChild(h);
+    byDay[day].forEach(function (it) {
+      var r = el("div", "item");
+      r.appendChild(el("b", null, it.name));
+      var ts = it.times.map(hhmm).join(" · ");
+      if (it.count > it.times.length) ts += "  … +" + (it.count - it.times.length) + " more";
+      r.appendChild(el("span", "t", ts));
+      box.appendChild(r);
+    });
+    grid.appendChild(box);
+  });
+  root.appendChild(grid);
+}
+
+function renderHabits(root, d) {
+  var runs = d.history || [];
+  var first = dayStart(new Date(Date.now() - (HIST_DAYS - 1) * 86400000));
+  var keys = [];
+  for (var i = 0; i < HIST_DAYS; i++) keys.push(dayKey(new Date(first.getFullYear(), first.getMonth(), first.getDate() + i)));
+  var prio = { done: 4, missed: 3, skipped: 2, cancelled: 1 };
+  var tags = {};
+  runs.forEach(function (r) {
+    var k = dayKey(new Date(r.ms));
+    if (keys.indexOf(k) < 0) return;
+    var g = tags[r.tag] || (tags[r.tag] = { days: {}, done: 0, missed: 0, skipped: 0, cancelled: 0, mins: 0 });
+    var cur = g.days[k];
+    if (!cur || (prio[r.outcome] || 0) > (prio[cur] || 0)) g.days[k] = r.outcome;
+    g[r.outcome] = (g[r.outcome] || 0) + 1;
+    if (r.outcome === "done" && r.unit === "min") g.mins += r.amount || 0;
+  });
+  var names = Object.keys(tags).sort();
+  section(root, "Last " + HIST_DAYS + " days", names.length || null);
+  if (!names.length) { root.appendChild(el("div", "empty", "No finished, missed or skipped runs yet.")); }
+  else {
+    var box = el("div", "hist");
+    names.forEach(function (n) {
+      var g = tags[n];
+      box.appendChild(el("div", "name", n));
+      var cells = el("div", "cells");
+      keys.forEach(function (k, idx) {
+        var o = g.days[k];
+        var c = el("span", "cell" + (o ? " " + o : "") + (idx === keys.length - 1 ? " today" : ""));
+        c.title = k + (o ? " · " + o : "");
+        cells.appendChild(c);
+      });
+      box.appendChild(cells);
+      var parts = [];
+      if (g.done) parts.push(g.done + " done");
+      if (g.missed) parts.push(g.missed + " missed");
+      if (g.skipped) parts.push(g.skipped + " skipped");
+      if (g.cancelled) parts.push(g.cancelled + " cancelled");
+      if (g.mins) parts.push(minutes(g.mins));
+      box.appendChild(el("div", "sub", parts.join(" · ")));
+    });
+    root.appendChild(box);
+    var lg = el("div", "legend");
+    ["done", "missed", "skipped", "cancelled"].forEach(function (o) {
+      var s = el("span");
+      s.appendChild(el("span", "cell " + o));
+      s.appendChild(document.createTextNode(o));
+      lg.appendChild(s);
+    });
+    root.appendChild(lg);
+  }
+}
+
+function renderLog(root, d) {
+  var latest = (d.history || []).slice(-30).reverse();
+  section(root, "Latest log", latest.length || null);
+  if (!latest.length) return;
+  var wrap = el("div", "scroll"), tb = el("table");
+  var hd = el("tr");
+  ["When", "Name", "Outcome", "Length", "Note"].forEach(function (h) { hd.appendChild(el("th", null, h)); });
+  tb.appendChild(hd);
+  latest.forEach(function (r) {
+    var tr = el("tr");
+    tr.appendChild(el("td", null, when(r.ms)));
+    tr.appendChild(el("td", null, r.tag));
+    tr.appendChild(el("td", r.outcome + "-t", r.outcome));
+    tr.appendChild(el("td", null, r.unit === "min" && r.amount ? minutes(r.amount) : ""));
+    tr.appendChild(el("td", "sub", r.note || ""));
+    tb.appendChild(tr);
+  });
+  wrap.appendChild(tb);
+  root.appendChild(wrap);
+}
+
+function render() {
+  var d = window.TICK;
+  var root = document.createDocumentFragment();
+  live = [];
+  if (!d) {
+    root.appendChild(el("div", "empty", "No data yet. Run: tick dashboard"));
+    $("content").replaceChildren(root);
+    return;
+  }
+  var timers = d.timers || [];
+  var attn = timers.filter(function (t) { return t.state === "due" || t.state === "done"; });
+  var running = timers.filter(function (t) { return t.state === "running"; });
+  var paused = timers.filter(function (t) { return t.state === "paused"; });
+  var sched = timers.filter(function (t) { return t.state === "scheduled"; });
+  var ringing = timers.filter(function (t) { return t.ringing && !t.repeat; });
+
+  var banner = $("banner");
+  banner.replaceChildren();
+  if (ringing.length) {
+    banner.appendChild(el("div", "banner", "🔔 Ringing: " + ringing.map(function (t) { return t.name; }).join(", ") + "  (tick silence)"));
+  }
+  if (!timers.length) root.appendChild(el("div", "empty", "No timers yet."));
+
+  if (attn.length) {
+    section(root, "Needs you", attn.length);
+    var g = el("div", "grid");
+    attn.forEach(function (t) { g.appendChild(attnCard(t)); });
+    root.appendChild(g);
+  }
+  if (running.length) {
+    section(root, "Running", running.length);
+    var g2 = el("div", "grid");
+    running.forEach(function (t) { g2.appendChild(runningCard(t)); });
+    root.appendChild(g2);
+  }
+  if (paused.length) {
+    section(root, "Paused", paused.length);
+    var g3 = el("div", "grid");
+    paused.forEach(function (t) { g3.appendChild(pausedCard(t)); });
+    root.appendChild(g3);
+  }
+  if (sched.length) {
+    section(root, "Scheduled", sched.length);
+    var wrap = el("div", "scroll"), tb = el("table"), hd = el("tr");
+    ["Name", "Schedule", "Length", "Next"].forEach(function (h) { hd.appendChild(el("th", null, h)); });
+    tb.appendChild(hd);
+    scheduledRows(tb, sched);
+    wrap.appendChild(tb);
+    root.appendChild(wrap);
+  }
+  renderHabits(root, d);
+  renderAgenda(root, d);
+  renderLog(root, d);
+  $("content").replaceChildren(root);
+  tick();
+}
+
+function status() {
+  var s = $("status"), d = window.TICK;
+  if (!d) {
+    s.className = "chip bad";
+    s.textContent = loadFailed ? "no data file yet" : "loading…";
+    return;
+  }
+  var age = Date.now() - d.generated_ms;
+  if (d.source === "daemon" && age < 90000) {
+    s.className = "chip ok";
+    s.textContent = "daemon running" + (d.pid ? " · pid " + d.pid : "");
+  } else if (d.source === "daemon") {
+    s.className = "chip bad";
+    s.textContent = "daemon stopped updating · data from " + hhmm(d.generated_ms);
+  } else {
+    s.className = "chip warn";
+    s.textContent = "snapshot from " + hhmm(d.generated_ms) + " · not updating (tick daemon start)";
+  }
+}
+
+function tick() {
+  var now = Date.now();
+  $("now").textContent = new Date(now).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  live.forEach(function (f) { f(now); });
+  status();
+}
+
+// A file:// page cannot fetch a file, but it can load a script. Each poll adds a
+// fresh <script> tag for the data file (the query string defeats the cache).
+function load() {
+  var s = document.createElement("script");
+  s.src = "dashboard-data.js?t=" + Date.now();
+  s.onload = function () {
+    s.remove();
+    loadFailed = false;
+    var g = window.TICK && window.TICK.generated_ms;
+    if (g !== lastGen) { lastGen = g; render(); }
+  };
+  s.onerror = function () { s.remove(); loadFailed = true; if (!window.TICK) render(); };
+  document.head.appendChild(s);
+}
+
+load();
+setInterval(load, 2000);
+setInterval(tick, 250);
+</script>
+</body>
+</html>

@@ -33,6 +33,11 @@ func DaemonLock() string {
 func RunLog() string { return filepath.Join(Data(), "runs.jsonl") }
 func Config() string { return filepath.Join(Data(), "config.toml") }
 
+// Dashboard is the static page; DashboardData is the .js file the daemon keeps
+// fresh next to it (a file:// page can load a script but cannot fetch a JSON file).
+func Dashboard() string     { return filepath.Join(Data(), "dashboard.html") }
+func DashboardData() string { return filepath.Join(Data(), "dashboard-data.js") }
+
 // Ensure creates the data and log directories, readable only by the user.
 func Ensure() error {
 	if err := os.MkdirAll(Data(), 0o700); err != nil {
