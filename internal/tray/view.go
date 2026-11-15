@@ -107,34 +107,34 @@ func Rows(st *store.State, now time.Time) []Row {
 			r.Section = "Stopwatches"
 			r.Text = fmt.Sprintf("%s  ↑%s", t.Name, Clock(t.Elapsed(now)))
 			if t.State == timer.Running {
-				r.Actions = []Action{{"Pause", ops.Pause}, {"Restart", ops.Restart}, {"Cancel", ops.Cancel}}
+				r.Actions = []Action{{"Pause", ops.Pause}, {"Restart", ops.Restart}, {"Done", ops.Done}, {"Cancel", ops.Cancel}}
 			} else {
 				r.Text += "  (paused)"
-				r.Actions = []Action{{"Resume", ops.Start}, {"Restart", ops.Restart}, {"Cancel", ops.Cancel}}
+				r.Actions = []Action{{"Resume", ops.Start}, {"Restart", ops.Restart}, {"Done", ops.Done}, {"Cancel", ops.Cancel}}
 			}
 		case t.State == timer.Due:
 			r.Section = "Due"
 			r.Text = fmt.Sprintf("%s  due %s%s", t.Name, t.DueAt.Local().Format("15:04"), label)
-			start := "Done"
+			start, verb := "Done", ops.Done
 			if t.Duration > 0 {
-				start = "Start " + Clock(time.Duration(t.Duration))
+				start, verb = "Start "+Clock(time.Duration(t.Duration)), ops.Start
 			}
-			r.Actions = []Action{{start, ops.Start}, {"Skip", ops.Skip}, {"Pause schedule", ops.Pause}, {"Cancel", ops.Cancel}}
+			r.Actions = []Action{{start, verb}, {"Skip", ops.Skip}, {"Pause schedule", ops.Pause}, {"Remove schedule", ops.Rm}}
 		case t.State == timer.Running:
 			r.Section = "Running"
 			r.Text = fmt.Sprintf("%s  %s", t.Name, Clock(t.Remaining(now)))
 			if t.Repeat {
 				r.Text += "  ↻"
 			}
-			r.Actions = []Action{{"Pause", ops.Pause}, {"Restart", ops.Restart}, {"Cancel", ops.Cancel}}
+			r.Actions = []Action{{"Pause", ops.Pause}, {"Restart", ops.Restart}, {"Done", ops.Done}, {"Cancel", ops.Cancel}}
 		case t.State == timer.Paused:
 			r.Section = "Paused"
 			r.Text = fmt.Sprintf("%s  %s left", t.Name, Clock(t.Remaining(now)))
-			r.Actions = []Action{{"Resume", ops.Start}, {"Restart", ops.Restart}, {"Cancel", ops.Cancel}}
+			r.Actions = []Action{{"Resume", ops.Start}, {"Restart", ops.Restart}, {"Done", ops.Done}, {"Cancel", ops.Cancel}}
 		case t.State == timer.Done:
 			r.Section = "Done"
 			r.Text = t.Name + "  finished"
-			r.Actions = []Action{{"Restart", ops.Restart}, {"Cancel", ops.Cancel}}
+			r.Actions = []Action{{"Restart", ops.Restart}, {"Clear", ops.Done}}
 		case t.State == timer.Scheduled:
 			r.Section = "Scheduled"
 			switch {
@@ -153,7 +153,7 @@ func Rows(st *store.State, now time.Time) []Row {
 			default:
 				r.Text = t.Name + "  (no more occurrences)"
 			}
-			r.Actions = append(r.Actions, Action{"Cancel", ops.Cancel})
+			r.Actions = append(r.Actions, Action{"Remove schedule", ops.Rm})
 		}
 		if sched && t.State == timer.Running {
 			r.Actions = append(r.Actions[:len(r.Actions)-1], Action{"Skip next", ops.Skip}, Action{"Cancel", ops.Cancel})

@@ -159,7 +159,7 @@ func TestScheduledReminderEndToEnd(t *testing.T) {
 	r.now = time.Date(2026, 11, 16, 19, 0, 0, 0, time.Local)
 	r.step(t)
 	notes := waitNotes(r.rec, 1)
-	if len(notes) != 1 || notes[0] != "⏰ guitar · Daily 18:30 | Was due at 18:30 while the Mac slept. Due now. Start it from the menu bar or: tick timer guitar start" {
+	if len(notes) != 1 || notes[0] != "⏰ guitar · Daily 18:30 | Was due at 18:30 while the Mac slept. Due now. Start it from the menu bar or: tick guitar start" {
 		t.Fatalf("due notification %q", notes)
 	}
 	if _, err := r.ops.Apply("guitar", timer.KindTimer, ops.Start, nil); err != nil {
@@ -174,6 +174,50 @@ func TestScheduledReminderEndToEnd(t *testing.T) {
 	st, _ := r.d.Store.Load()
 	if g := st.Find("guitar"); g == nil || g.State != timer.Scheduled || !g.NextAt.Equal(time.Date(2026, 11, 17, 18, 30, 0, 0, time.Local)) {
 		t.Fatalf("after the run: %+v", g)
+	}
+}
+
+func TestPendingReminderEndToEnd(t *testing.T) {
+	r := newRig(t)
+	s, err := schedule.New([]string{"FREQ=DAILY;BYHOUR=9;BYMINUTE=0"}, nil, r.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm, _ := timer.NewScheduled("meds", 0, s, r.now)
+	r.ops.Create(tm)
+
+	r.now = time.Date(2026, 11, 16, 9, 0, 0, 0, time.Local)
+	r.step(t)
+	notes := waitNotes(r.rec, 1)
+	if len(notes) != 1 || notes[0] != "⏰ meds | Due now. Mark it done from the menu bar or: tick meds done" {
+		t.Fatalf("due notification %q", notes)
+	}
+
+	// Hours later it is still waiting: no nag, no missed.
+	r.now = r.now.Add(5 * time.Hour)
+	r.step(t)
+	time.Sleep(20 * time.Millisecond)
+	if notes, _ := r.rec.snapshot(); len(notes) != 1 {
+		t.Fatalf("a pending reminder must not nag: %q", notes)
+	}
+	st, _ := r.d.Store.Load()
+	if m := st.Find("meds"); m == nil || m.State != timer.Due {
+		t.Fatalf("still pending: %+v", m)
+	}
+	if len(readLog(t, r.d.RunLog)) != 0 {
+		t.Fatal("nothing is logged until the user resolves it")
+	}
+
+	if _, err := r.ops.Apply("meds", "", ops.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	log := readLog(t, r.d.RunLog)
+	if len(log) != 1 || log[0].Outcome != "done" || log[0].Tag != "meds" {
+		t.Fatalf("run log %+v", log)
+	}
+	if notes, _ := r.rec.snapshot(); len(notes) != 1 {
+		t.Fatalf("marking done does not notify: %q", notes)
 	}
 }
 

@@ -27,20 +27,39 @@ choose **Quit tick** from the menu (`tick daemon start` brings it back).
 ## Use
 
 ```sh
-tick timer pasta start 10m          # countdown; rings when done
-tick timer pasta                    # live view to the millisecond (Ctrl+C to leave)
-tick timer pasta pause | start | restart | cancel
-tick stopwatch work start           # counts up
-tick stopwatch work pause | start | restart | cancel
-tick 15m start                      # chime every 15 minutes: the timer named "tick"
-tick pause | start | restart | cancel   # ...act on it
-tick timer list                     # everything; add --json for scripts and LLMs
-tick silence                        # stop all ringing
-tick sounds                         # sound names for --sound and config (yours first)
-tick status                         # daemon alive?, next due, what is ringing
+tick                         # everything, printed once (-w keeps it live)
+tick t                       # running timers          tick s   running stopwatches
+tick pasta 10m               # countdown named pasta; rings when done, which counts as done
+tick pasta                   # live view to the millisecond (Ctrl+C to leave)
+tick pasta 10m -r            # starts again each time it finishes (counts the laps)
+tick 10m                     # an unnamed countdown, named 10m (then 10m-2 ...)
+tick s work                  # stopwatch, counts up
+tick pasta pause | resume | restart
+tick pasta done              # conclude it: logged as done with the time it ran (and laps)
+tick pasta cancel            # throw it away: logged as cancelled
+tick schedule                # set up a reminder by answering questions
+tick guitar done | cancel    # a reminder that rang: mark it done, or skip it
+tick guitar rm               # delete a whole schedule
+tick silence                 # stop all ringing
+tick sounds                  # sound names for --sound and config (yours first)
+tick status                  # daemon alive?, next due, what is ringing
 tick daemon install | uninstall | start
-tick daemon --no-tray               # run in the foreground without the menu bar
+tick daemon --no-tray        # run in the foreground without the menu bar
 ```
+
+- A name is unique across timers and stopwatches. `tick pasta 10m` on a name that
+  exists is an error; look at it with `tick pasta`.
+- Words that are commands or verbs (`t s schedule status silence sounds dashboard
+  daemon help completion timer stopwatch list start pause resume restart done cancel
+  rm skip`) and anything shaped like a duration (`10m`) can't be names. `tick t pasta
+  pause` and `tick s work done` spell the kind out and check it.
+- `tick 10m pause` acts on the unnamed countdown called `10m`; a plain `tick 10m`
+  always makes a new one.
+- `--sound` and `--label` go with a new countdown: `tick pasta 10m --sound Hero`.
+- `--json` works on `tick`, `tick t`, `tick s` and `tick <name>`, for scripts and LLMs.
+- The long forms still work: `tick timer pasta start 10m`, `tick stopwatch work start`,
+  `tick timer list`, `tick 15m start` (the ticker, a repeating timer named `tick`) and
+  `tick pause | start | restart | cancel` for it.
 
 ### Menu bar
 
@@ -73,21 +92,32 @@ follows the macOS light and dark setting.
 
 ### Scheduled reminders and habits
 
-A scheduled timer waits. When an occurrence arrives it becomes **due**: it rings
-three times, notifies, and reminds again every 10 minutes (3 reminders in all).
-`start` begins its countdown, or acknowledges a reminder without a duration. If
-nobody starts it, the occurrence is logged as missed.
+A scheduled reminder waits. When an occurrence arrives it becomes **due**: it rings
+for `due_ring` (20 s), notifies once, and then **waits for you**, in the menu bar's
+Due section and on the dashboard, with no nagging. Mark it with `tick guitar done`
+(logged done), or `tick guitar cancel` (logged skipped). If the next occurrence
+arrives first, the unresolved one is logged as missed.
+
+`tick schedule` asks for the name, once or repeating, how often (every day, weekdays,
+weekends, certain days, a day of the month, every few hours or minutes, or a custom
+RRULE) and the time, then shows the next five occurrences and asks before creating
+anything. It needs a terminal. Scripts and the `/ticker` command use the flags:
 
 ```sh
-tick timer guitar start 15m --rrule "FREQ=DAILY;BYHOUR=18;BYMINUTE=30" --label "Daily 18:30"
+tick timer guitar start --rrule "FREQ=DAILY;BYHOUR=18;BYMINUTE=30" --label "Daily 18:30"
 tick timer meds start --rrule "FREQ=DAILY;BYHOUR=9,21;BYMINUTE=0" --label "9:00 and 21:00"
 tick timer dentist start --at "2026-11-20 09:00"
-tick timer guitar start 15m --rrule "..." --dry-run    # check: prints the next 5 dates
+tick timer guitar start --rrule "..." --dry-run    # check: prints the next 5 dates
 
-tick timer guitar skip                 # skip the due or next occurrence
-tick timer guitar pause --until 2026-12-03   # pause the schedule, resume then
-tick timer guitar start                # resume a paused schedule, or start early
+tick guitar cancel                     # skip the due or next occurrence (same as skip)
+tick guitar pause --until 2026-12-03   # pause the schedule, resume then
+tick guitar resume                     # resume a paused schedule
+tick guitar rm                         # delete the whole schedule
 ```
+
+A schedule created with a duration (`tick timer guitar start 15m --rrule ...`) still
+works: `tick guitar start` begins the countdown when it is due. New reminders from
+`tick schedule` have none.
 
 - Schedules are RFC 5545 RRULE bodies restricted to FREQ (MINUTELY to YEARLY),
   INTERVAL, COUNT, UNTIL, BYDAY, BYMONTHDAY, BYMONTH, BYSETPOS, BYHOUR and BYMINUTE.
@@ -111,7 +141,7 @@ only by you:
 | File | What |
 |---|---|
 | `state.json` | all timers (CLI and daemon share it under an flock) |
-| `runs.jsonl` | one line per finished, skipped, missed or cancelled run: `ts, tag, amount, unit, note, outcome, kind` |
+| `runs.jsonl` | one line per done, skipped, missed or cancelled run: `ts, tag, amount, unit, note, outcome, kind` (a repeating timer logs one `done` with `note: "7 laps"`) |
 | `config.toml` | optional settings, below |
 | `dashboard.html`, `dashboard-data.js` | the dashboard page and its data (your timer names and history; generated, safe to delete) |
 
@@ -126,12 +156,11 @@ sounds_dir = ""          # a folder of your own sounds, e.g. "~/…/tick/sounds"
 volume = 0.8
 ring_interval = "5s"     # between repeats of the sound
 ring_cap = "2m"          # a finished timer stops ringing after this
-nag_interval = "10m"     # between reminders of a due occurrence
-nag_count = 3
+due_ring = "20s"         # how long a due occurrence rings before it waits quietly
 grace = "2h"
 ```
 
-Per timer, `--sound` overrides `sound`. Notifications are posted by `osascript`, so
+`nag_interval` and `nag_count` from older configs are ignored. Per timer, `--sound` overrides `sound`. Notifications are posted by `osascript`, so
 macOS shows them as coming from Script Editor, and you may have to allow them once
 in System Settings → Notifications.
 

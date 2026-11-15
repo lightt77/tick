@@ -34,6 +34,7 @@ const TickerName = "tick"
 
 type flags struct {
 	json, dryRun, repeat bool
+	watch                bool
 	sound, grace, at     string
 	label, until         string
 	rules                []string
@@ -83,48 +84,136 @@ func (a *app) rootCmd() *cobra.Command {
 		Long: `tick keeps countdowns, stopwatches, a repeating ticker and scheduled reminders.
 A background daemon (tick daemon install) rings, notifies and shows them in the menu bar.
 
-  tick timer pasta start 10m        countdown
-  tick timer pasta                  live view
-  tick stopwatch work start         stopwatch
-  tick 15m start                    chime every 15 minutes (the timer "tick")
-  tick timer guitar start 15m --rrule "FREQ=DAILY;BYHOUR=18;BYMINUTE=30" --label "Daily 18:30"
-  tick timer dentist start --at "2026-11-20 09:00"
+  tick                       everything, printed once (-w keeps it live)
+  tick t   |   tick s        running timers   |   running stopwatches
+  tick pasta                 live view of "pasta"
+  tick pasta 10m             countdown named pasta        tick 10m   unnamed countdown
+  tick pasta 10m -r          repeats each time it finishes
+  tick s work                stopwatch
+  tick pasta pause|resume|restart|done|cancel
+  tick guitar done           mark a due reminder done (cancel skips it, rm deletes the schedule)
+  tick schedule              set up a reminder, with questions
+  tick pasta 10m --sound Hero --label "boil"
 
-Verbs: start (also resumes), pause, restart, cancel, skip (scheduled timers).`,
+A reminder from a script or an LLM: tick timer guitar start --rrule "FREQ=DAILY;BYHOUR=18;BYMINUTE=30"
+The long forms (tick timer ..., tick stopwatch ..., tick 15m start) still work.`,
 		Args:          cobra.ArbitraryArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          a.runShortcut,
 	}
+	f := root.Flags()
+	f.BoolVarP(&a.f.repeat, "repeat", "r", false, "with a duration: start again each time it finishes")
+	f.BoolVarP(&a.f.watch, "watch", "w", false, "with tick, tick t or tick s: keep the screen live")
+	f.BoolVar(&a.f.json, "json", false, "print JSON (tick, tick t, tick s, tick <name>)")
+	f.StringVar(&a.f.sound, "sound", "", "with a duration: sound name (tick sounds) or file path")
+	f.StringVar(&a.f.label, "label", "", "with a duration: plain description shown in lists and the menu bar")
+	f.StringVar(&a.f.until, "until", "", `with pause: resume a schedule automatically, "YYYY-MM-DD [HH:MM]"`)
 	root.AddCommand(a.timerCmd(timer.KindTimer), a.timerCmd(timer.KindStopwatch),
-		a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd(), a.dashboardCmd())
+		a.scheduleCmd(), a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd(), a.dashboardCmd())
 	return root
 }
 
-// tick 15m start | tick start | tick pause | tick restart | tick cancel
+// runShortcut is the short grammar (see route.go) and the old tick 15m start / tick pause.
 func (a *app) runShortcut(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return cmd.Help()
+	act, err := parse(args)
+	if err != nil {
+		return err
 	}
-	if d, err := time.ParseDuration(args[0]); err == nil {
-		if len(args) != 2 || args[1] != ops.Start {
-			return fmt.Errorf("usage: tick %s start", args[0])
-		}
+	creating := act.Kind == actCreateTimer || act.Kind == actTicker
+	switch {
+	case a.f.repeat && !creating:
+		return fmt.Errorf("-r goes with a duration: tick <name> 10m -r")
+	case (a.f.sound != "" || a.f.label != "") && !creating && act.Kind != actCreateStopwatch:
+		return fmt.Errorf("--sound and --label go with a duration: tick <name> 10m --sound Hero")
+	case a.f.watch && act.Kind != actOverview && act.Kind != actList:
+		return fmt.Errorf("-w goes with: tick, tick t or tick s")
+	case a.f.until != "" && act.Kind != actVerb:
+		return fmt.Errorf("--until goes with pause: tick <name> pause --until 2026-12-03")
+	}
+	switch act.Kind {
+	case actOverview:
+		return a.overview("")
+	case actList:
+		return a.overview(act.Of)
+	case actShow:
+		return a.show(act.Of, act.Name)
+	case actCreateTimer:
+		return a.createNamed(timer.KindTimer, act.Name, &act.Duration)
+	case actCreateStopwatch:
+		return a.createNamed(timer.KindStopwatch, act.Name, nil)
+	case actVerb:
+		return a.verbOn(act)
+	case actTicker:
 		a.f.repeat = true
-		return a.timerVerb(timer.KindTimer, TickerName, ops.Start, &d)
+		return a.timerVerb(timer.KindTimer, TickerName, ops.Start, &act.Duration)
+	case actTickerVerb:
+		return a.timerVerb(timer.KindTimer, TickerName, act.Verb, nil)
 	}
-	if len(args) == 1 && isVerb(args[0]) {
-		return a.timerVerb(timer.KindTimer, TickerName, args[0], nil)
-	}
-	return fmt.Errorf("unknown command %q (see tick --help)", strings.Join(args, " "))
+	return nil
 }
 
-func isVerb(s string) bool {
-	switch s {
-	case ops.Start, ops.Pause, ops.Restart, ops.Cancel, ops.Skip:
-		return true
+func noSuch(name string) error {
+	return fmt.Errorf("No such timer or stopwatch exists: %q", name)
+}
+
+// autoName names an unnamed countdown after its length: 10m, then 10m-2, 10m-3 ...
+func autoName(st *store.State, d time.Duration) string {
+	base := daemon.Short(d)
+	name := base
+	for i := 2; st.Find(name) != nil; i++ {
+		name = fmt.Sprintf("%s-%d", base, i)
 	}
-	return false
+	return name
+}
+
+// createNamed makes a new countdown (d set) or stopwatch (d nil). An empty name
+// means an unnamed countdown. A name that is already taken is an error, whatever
+// state the other one is in.
+func (a *app) createNamed(kind timer.Kind, name string, d *time.Duration) error {
+	o, err := a.ops()
+	if err != nil {
+		return err
+	}
+	st, err := o.Store.Load()
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		name = autoName(st, *d)
+	}
+	if ex := st.Find(name); ex != nil {
+		return fmt.Errorf("%s already exists (%s, %s); see it with: tick %s", name, ex.Kind, ex.State, quoteArg(name))
+	}
+	return a.create(o, kind, name, d, time.Now())
+}
+
+// verbOn applies a verb to an existing timer or stopwatch, with an optional t/s check.
+func (a *app) verbOn(act Action) error {
+	s, err := a.store()
+	if err != nil {
+		return err
+	}
+	st, err := s.Load()
+	if err != nil {
+		return err
+	}
+	t := st.Find(act.Name)
+	if t == nil {
+		return noSuch(act.Name)
+	}
+	if act.Of != "" && t.Kind != act.Of {
+		return fmt.Errorf("%s is a %s, not a %s", act.Name, t.Kind, act.Of)
+	}
+	return a.timerVerb(t.Kind, act.Name, act.Verb, nil)
+}
+
+// quoteArg wraps a name with spaces so a hint can be pasted.
+func quoteArg(name string) string {
+	if strings.ContainsAny(name, " \t'\"") {
+		return `"` + strings.ReplaceAll(name, `"`, `\"`) + `"`
+	}
+	return name
 }
 
 func (a *app) timerCmd(kind timer.Kind) *cobra.Command {
@@ -224,6 +313,9 @@ func (a *app) creationFlagsUsed() bool {
 }
 
 func (a *app) timerVerb(kind timer.Kind, name, verb string, d *time.Duration) error {
+	if v, ok := verbs[verb]; ok {
+		verb = v // resume is start
+	}
 	o, err := a.ops()
 	if err != nil {
 		return err
@@ -356,15 +448,43 @@ func (a *app) report(res ops.Result, verb string) error {
 		}
 	}
 	if res.Deleted {
-		if verb == ops.Cancel {
+		switch verb {
+		case ops.Done:
+			fmt.Fprintf(a.out, "%s done%s\n", res.Name, ranText(res.Events))
+		case ops.Cancel:
 			fmt.Fprintf(a.out, "%s cancelled\n", res.Name)
-		} else {
+		case ops.Rm:
+			fmt.Fprintf(a.out, "%s removed\n", res.Name)
+		default:
 			fmt.Fprintf(a.out, "%s has no more occurrences and was removed\n", res.Name)
 		}
 		return nil
 	}
+	if verb == ops.Done {
+		fmt.Fprintf(a.out, "%s done%s\n", res.Name, ranText(res.Events))
+	}
 	fmt.Fprintf(a.out, "%s: %s\n", res.Timer.Name, statusText(res.Timer, now, false))
 	return nil
+}
+
+// ranText is " · 34m · 3 laps" for the run a done verb just concluded.
+func ranText(evs []timer.Event) string {
+	for _, ev := range evs {
+		if ev.Kind != timer.EvFinished {
+			continue
+		}
+		var parts []string
+		if ev.Amount >= time.Second {
+			parts = append(parts, daemon.Short(ev.Amount))
+		}
+		if ev.Note != "" {
+			parts = append(parts, ev.Note)
+		}
+		if len(parts) > 0 {
+			return " · " + strings.Join(parts, " · ")
+		}
+	}
+	return ""
 }
 
 func (a *app) warnIfNoDaemon() {
@@ -407,10 +527,10 @@ func (a *app) show(kind timer.Kind, name string) error {
 	}
 	t := st.Find(name)
 	if t == nil {
-		return fmt.Errorf("no %s named %q", kind, name)
+		return noSuch(name)
 	}
-	if t.Kind != kind {
-		return fmt.Errorf("%s is a %s; use tick %s %s", name, t.Kind, t.Kind, name)
+	if kind != "" && t.Kind != kind {
+		return fmt.Errorf("%s is a %s, not a %s", name, t.Kind, kind)
 	}
 	now := time.Now()
 	if a.f.json {

@@ -99,11 +99,13 @@ States: `scheduled`, `due`, `running`, `paused`, `done`.
 
 | Verb | Effect |
 |---|---|
-| `start` | Name unknown: the CLI creates it. On paused: resume. On done: run again. On due: begin the countdown, or for a reminder without a duration, log it done and return to scheduled. On a schedule paused with `pause`: resume the schedule. On scheduled with a duration: an early, off-schedule run now. On scheduled without a duration: a no-op. On running: a no-op. |
+| `start` / `resume` | Name unknown: the long CLI form creates it (the short form errors). On paused: resume. On done: run again. On due: begin the countdown (only for schedules that have a duration; others use `done`). On a schedule paused with `pause`: resume the schedule. On scheduled with a duration: an early, off-schedule run now. On scheduled without a duration: a no-op. On running: a no-op. |
 | `pause` | Running → paused (banks the time). Scheduled or due → schedule suspended (`Suspended`, optional `SuspendedUntil` for auto-resume); a due occurrence is logged as skipped. |
-| `restart` | Countdown back to its full duration and running; stopwatch zeroed and running. A no-op on scheduled or due ("use start or skip"). |
-| `cancel` | Deletes it. Logs `cancelled` with the elapsed amount, except for a `done` countdown, which was already logged as `done`. |
-| `skip` | Scheduled timers only. Skips the due occurrence, or else the next one (added to `Schedule.Skipped`). Removes the timer if nothing is left. |
+| `restart` | Countdown back to its full duration and running; stopwatch zeroed and running. A no-op on scheduled or due. |
+| `done` | Concludes it (`Timer.Done`). Stopwatch or countdown: logs `done` with the time it ran and deletes it; a repeating timer logs one `done` with the lap count in `note` ("7 laps"). A finished (rung) countdown was already logged, so it is only cleared. A schedule in `due`: logs `done` and goes back to `scheduled` (deleted if it was the last occurrence). A schedule with nothing pending: a no-op. The event has `User` set, so no notification. |
+| `cancel` | On a stopwatch or timer: deletes it and logs `cancelled` with the time it ran (and laps), except a rung countdown (already logged). On a schedule: drops the due or next occurrence (the `skip` behaviour, logged `skipped`), or aborts a countdown the schedule started (`AbortRun`, logged `cancelled`); the schedule stays. |
+| `rm` | Deletes it, whatever it is: a whole schedule goes, logged `cancelled`. For a timer or stopwatch it is the same as `cancel`. |
+| `skip` | Scheduled timers only; same as `cancel` on a schedule. Skips the due occurrence, or else the next one (added to `Schedule.Skipped`). Removes the timer if nothing is left. |
 | `silence` | Clears `Ringing` only (tray, and `tick silence` for all timers). |
 
 No-ops return `timer.ErrNoop`. The CLI prints them and exits 0; `Update` saves
@@ -123,15 +125,16 @@ nothing.
 4. Occurrences that have arrived (`NextAt <= now`):
    - all except the latest are logged as missed (up to 50, through `Between`)
    - the latest becomes **due** if it's within the grace window (`timer.Grace`, else
-     `settings.Grace`, default 2h), with `Late` set when more than 90 s late, a nag
-     ring, and `Nags=1`
+     `settings.Grace`, default 2h), with `Late` set when more than 90 s late, and a
+     ring of `due_ring` (20 s)
    - an occurrence that arrives while a previous run is still running or paused is
      missed, and a new one arriving while still due replaces it (the old one is
      missed)
    - `NextAt` is then recomputed
-5. Nagging: a due occurrence re-alerts every `nag_interval` up to `nag_count`
-   alerts in all (the first alert counts), then lapses as missed. A nag rings 3
-   times, `ring_interval` apart.
+5. There is no nagging. A due occurrence rings for `due_ring`, then **waits**
+   (state stays `due`, shown as pending) until the user resolves it with `done`,
+   `cancel`/`skip`, or `pause`. If the next occurrence arrives first, the old one is
+   logged missed ("next occurrence arrived") and the new one takes its place.
 6. `remove = true` when the timer is scheduled, not suspended, has no `NextAt` and
    isn't ringing. One-time reminders and exhausted `COUNT`/`UNTIL` rules are cleaned
    up this way.
@@ -179,7 +182,7 @@ resume. That keeps RRULE work to about one call per occurrence.
 3. If anything changed: inside `store.Update`, advance for real, collect events and
    drop removed timers.
 4. Events go to `runs.jsonl` (done, missed, skipped, cancelled; ticker laps and
-   due/nag alerts are not logged) and to notifications through `Announcement`.
+   due alerts are not logged) and to notifications through `Announcement`.
 5. `Ringer.Reconcile(rings)` keeps one goroutine per ringing timer. A ring is
    identified by `Ringing.Since`: the same `Since` is never replayed, and a new
    `Since` restarts the loop.
@@ -250,7 +253,8 @@ choice: no port, no auth, nothing to keep running.
 
 - **Sound:** `afplay -v <volume> <file>`, which blocks for one play. A ring loop
   plays, waits `ring_interval`, and stops when the next play would fall past
-  `Until + interval/2`. That gives: a chime plays once, a nag 3 times, and a
+  `Until + interval/2`. That gives: a chime plays once, a due occurrence for `due_ring`
+  (20 s: five plays at the default 5 s interval), and a
   finished timer until `ring_cap`.
 - **Notifications:** `osascript` with title and message passed as **argv** (`on run
   argv`), never interpolated into the script, so timer names cannot inject
@@ -271,7 +275,8 @@ Data: `~/Library/Application Support/tick/` (0700 dir, 0600 files).
   These fields were chosen to become the future event ledger, so it can be reused
   as is.
 - `config.toml`: see the README. Keys: `sound`, `sounds_dir`, `volume`,
-  `ring_interval`, `ring_cap`, `nag_interval`, `nag_count`, `grace`.
+  `ring_interval`, `ring_cap`, `due_ring`, `grace`. Old `nag_interval` and
+  `nag_count` keys are ignored.
 - `dashboard.html`, `dashboard-data.js`: generated (see Dashboard). Safe to delete;
   they come back with `tick dashboard` and the daemon.
 
@@ -290,12 +295,35 @@ LaunchAgent: `~/Library/LaunchAgents/local.tick.daemon.plist`
 
 ## CLI contract (`internal/cli`)
 
-- **Grammar:** `tick timer <name> [verb] [duration]`, `tick stopwatch <name> [verb]`,
-  `tick timer list`, plus the shortcuts `tick <dur> start` (a repeating timer named
-  `tick`) and `tick start|pause|restart|cancel` (that timer). Also `status`,
-  `silence`, `sounds`, `dashboard [--no-open]`, and `daemon [install|uninstall|start] [--no-tray]`.
-- **Creation flags** (`--rrule` (repeatable), `--at`, `--label`, `--sound`, `--grace`,
-  `--repeat`, `--dry-run`) apply only when `start` creates a new name. On an
+- **Grammar** (`route.go`, pure `parse(args) (Action, error)`, table-tested):
+  - `tick` overview; `tick t` / `tick s` running timers / stopwatches (`-w` redraws
+    four times a second; piped or without a terminal it prints once)
+  - `tick <name>` live view; `tick <name> <duration> [-r]` countdown;
+    `tick <duration> [-r]` unnamed countdown, auto-named `10m`, `10m-2`, ...;
+    `tick s <name>` stopwatch; `tick <name> <verb>`; `tick t|s <name> ...` states the
+    kind and checks it; `tick <duration> <verb>` acts on an auto-named countdown
+  - verbs: `start` `resume` `pause` `restart` `done` `cancel` `rm` `skip`
+  - first-word reserved: `t s schedule status silence sounds dashboard daemon help
+    completion timer stopwatch list`, every verb, and anything `time.ParseDuration`
+    reads (so a name can't be `10m`; `checkName`). Auto-names are the one exception.
+  - **Names are one namespace** across timers and stopwatches (`store.Find`), so there
+    is no "both kinds" ambiguity; the `t`/`s` prefix is only a check.
+  - **Old forms** stay: `tick timer <name> [verb] [duration]` and `tick stopwatch ...`
+    (the cobra commands), `tick <dur> start` (the ticker, `actTicker`) and a bare
+    verb for the timer named `tick` (`actTickerVerb`).
+  - Also `status`, `silence`, `sounds`, `dashboard [--no-open]`,
+    `daemon [install|uninstall|start] [--no-tray]`, and `schedule` (below).
+- **Root flags:** `-r/--repeat`, `-w/--watch`, `--json`, `--sound`, `--label`, `--until`.
+  Each is refused on a form it doesn't fit ("-r goes with a duration").
+- **`tick schedule`** (`schedule_prompt.go`): a conversation on stdin (numbered menus,
+  standard library only). Name, once or repeating, how often, time(s) of day, more
+  options, a dry-run preview, and a y/n. `buildRules` is pure and its output is
+  checked against `schedule.Validate`; one RRULE per time of day. It refuses a
+  non-terminal stdin and points to the flags, because an LLM can't answer prompts.
+  It reuses `app.create` (set `a.f.rules`/`a.f.at`/`a.f.dryRun`), so it makes exactly
+  what `tick timer <name> start --rrule ...` makes. New reminders have no duration.
+- **Creation flags** of the long form (`--rrule` (repeatable), `--at`, `--label`, `--sound`,
+  `--grace`, `--repeat`, `--dry-run`) apply only when `start` creates a new name. On an
   existing name they are an error: "cancel it first".
 - **`--json`** prints `View`, the stable shape the LLM reads:
   - `remaining` / `remaining_ms` for countdowns, `elapsed` / `elapsed_ms` for
@@ -306,8 +334,8 @@ LaunchAgent: `~/Library/LaunchAgents/local.tick.daemon.plist`
 - **`parseWhen`** accepts `YYYY-MM-DD HH:MM`, `YYYY-MM-DDTHH:MM`, `YYYY-MM-DD`
   (midnight), RFC 3339, and `HH:MM` (the next such time).
 - **Live view:** redraws every 33 ms, re-reads the state every 250 ms, and exits on
-  Ctrl+C, when the countdown finishes, or when the timer is deleted. When stdout is
-  not a terminal it prints one line instead.
+  Ctrl+C, when the countdown finishes, or when the timer is ended (done, cancelled or
+  deleted). When stdout is not a terminal it prints one line instead. It is view-only.
 
 ## The `/ticker` command
 

@@ -19,13 +19,13 @@ func write(t *testing.T, content string) string {
 
 func TestLoadDefaultsWhenMissing(t *testing.T) {
 	c, s, err := Load(filepath.Join(t.TempDir(), "none.toml"))
-	if err != nil || c.Sound != "Glass" || s.RingCap != 2*time.Minute || s.NagCount != 3 {
+	if err != nil || c.Sound != "Glass" || s.RingCap != 2*time.Minute || s.DueRing != 20*time.Second {
 		t.Fatalf("defaults: %+v %+v %v", c, s, err)
 	}
 }
 
 func TestLoadRejectsBadValues(t *testing.T) {
-	for _, bad := range []string{`volume = 2`, `nag_count = 0`, `ring_cap = "soon"`, `grace = "-1h"`, `not toml`} {
+	for _, bad := range []string{`volume = 2`, `due_ring = "soon"`, `ring_cap = "soon"`, `grace = "-1h"`, `not toml`} {
 		if _, _, err := Load(write(t, bad)); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
@@ -33,17 +33,17 @@ func TestLoadRejectsBadValues(t *testing.T) {
 }
 
 func TestSetSoundReplacesAndKeepsTheRest(t *testing.T) {
-	p := write(t, "# my settings\nvolume = 0.5\nsound = \"Glass\"   # old\nnag_count = 2\n")
+	p := write(t, "# my settings\nvolume = 0.5\nsound = \"Glass\"   # old\ndue_ring = \"30s\"\n")
 	if err := SetSound(p, "Hero"); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	want := "# my settings\nvolume = 0.5\nsound = \"Hero\"\nnag_count = 2\n"
+	want := "# my settings\nvolume = 0.5\nsound = \"Hero\"\ndue_ring = \"30s\"\n"
 	if string(b) != want {
 		t.Fatalf("file:\n%s\nwant:\n%s", b, want)
 	}
 	c, s, err := Load(p)
-	if err != nil || c.Sound != "Hero" || c.Volume != 0.5 || s.NagCount != 2 {
+	if err != nil || c.Sound != "Hero" || c.Volume != 0.5 || s.DueRing != 30*time.Second {
 		t.Fatalf("after: %+v %v", c, err)
 	}
 	if info, _ := os.Stat(p); info.Mode().Perm() != 0o600 {
@@ -101,5 +101,11 @@ func TestSoundsDirExpandsHome(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if err != nil || c.SoundsDir != filepath.Join(home, "tick", "sounds") {
 		t.Fatalf("sounds_dir %q %v", c.SoundsDir, err)
+	}
+}
+
+func TestOldNagKeysAreIgnored(t *testing.T) {
+	if _, _, err := Load(write(t, "nag_interval = \"10m\"\nnag_count = 3\n")); err != nil {
+		t.Fatalf("an old config must still load: %v", err)
 	}
 }

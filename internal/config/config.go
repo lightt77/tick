@@ -21,8 +21,7 @@ type Config struct {
 	Volume       float64 `toml:"volume"`
 	RingInterval string  `toml:"ring_interval"`
 	RingCap      string  `toml:"ring_cap"`
-	NagInterval  string  `toml:"nag_interval"`
-	NagCount     int     `toml:"nag_count"`
+	DueRing      string  `toml:"due_ring"` // how long a due occurrence rings
 	Grace        string  `toml:"grace"`
 	SoundsDir    string  `toml:"sounds_dir"` // your own sounds, listed first
 }
@@ -30,7 +29,7 @@ type Config struct {
 // Defaults used for any key the file leaves out.
 var Defaults = Config{
 	Sound: "Glass", Volume: 0.8, RingInterval: "5s", RingCap: "2m",
-	NagInterval: "10m", NagCount: 3, Grace: "2h",
+	DueRing: "20s", Grace: "2h",
 }
 
 // Load reads path (a missing file means all defaults) and returns the config and
@@ -47,10 +46,7 @@ func Load(path string) (Config, timer.Settings, error) {
 	if c.Volume <= 0 || c.Volume > 1 {
 		return Defaults, timer.DefaultSettings, fmt.Errorf("%s: volume must be between 0 and 1", path)
 	}
-	if c.NagCount < 1 {
-		return Defaults, timer.DefaultSettings, fmt.Errorf("%s: nag_count must be at least 1", path)
-	}
-	s := timer.Settings{NagCount: c.NagCount}
+	s := timer.Settings{}
 	for _, f := range []struct {
 		key string
 		val string
@@ -58,7 +54,7 @@ func Load(path string) (Config, timer.Settings, error) {
 	}{
 		{"ring_interval", c.RingInterval, &s.RingInterval},
 		{"ring_cap", c.RingCap, &s.RingCap},
-		{"nag_interval", c.NagInterval, &s.NagInterval},
+		{"due_ring", c.DueRing, &s.DueRing},
 		{"grace", c.Grace, &s.Grace},
 	} {
 		d, err := time.ParseDuration(f.val)

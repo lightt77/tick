@@ -48,6 +48,7 @@ type TimerView struct {
 	State      string   `json:"state"`
 	DurationMs int64    `json:"duration_ms,omitempty"`
 	Repeat     bool     `json:"repeat,omitempty"`
+	Laps       int      `json:"laps,omitempty"` // finished laps of a repeating timer
 	Label      string   `json:"label,omitempty"`
 	Describe   string   `json:"describe,omitempty"` // the rules, when there is no label
 	Rules      []string `json:"rules,omitempty"`
@@ -132,7 +133,7 @@ func Build(st *store.State, now time.Time, runs []runlog.Entry, source string, p
 
 func view(t *timer.Timer, now time.Time) TimerView {
 	v := TimerView{Name: t.Name, Kind: string(t.Kind), State: string(t.State), DurationMs: time.Duration(t.Duration).Milliseconds(),
-		Repeat: t.Repeat, Label: t.Label, DueMs: msp(t.DueAt), Late: t.Late, Suspended: t.Suspended,
+		Repeat: t.Repeat, Laps: t.Laps, Label: t.Label, DueMs: msp(t.DueAt), Late: t.Late, Suspended: t.Suspended,
 		SuspendedUntilMs: msp(t.SuspendedUntil), Ringing: t.Ringing != nil, CreatedMs: ms(t.Created)}
 	if !t.Suspended {
 		v.NextMs = msp(t.NextAt)

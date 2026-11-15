@@ -16,10 +16,15 @@ const (
 	Start   = "start"
 	Pause   = "pause"
 	Restart = "restart"
-	Cancel  = "cancel"
-	Skip    = "skip"
+	Done    = "done"   // conclude: log it as done and clear it (a due occurrence goes back to waiting)
+	Cancel  = "cancel" // discard it; on a schedule, only the due or next occurrence
+	Rm      = "rm"     // delete it, a whole schedule included
+	Skip    = "skip"   // cancel for the due or next occurrence of a schedule
 	Silence = "silence"
 )
+
+// Verbs lists what Apply accepts, for messages.
+const Verbs = "start, pause, restart, done, cancel, rm, skip"
 
 // Ops binds the operations to a store and run log.
 type Ops struct {
@@ -89,8 +94,31 @@ func (o Ops) Apply(name string, kind timer.Kind, verb string, until *time.Time) 
 				st.Remove(name)
 				res.Deleted = true
 			}
+		case Done:
+			var remove bool
+			evs, remove, err = t.Done(now)
+			if err == nil && remove {
+				st.Remove(name)
+				res.Deleted = true
+			}
 		case Cancel:
-			// A finished countdown was already logged as done; cancelling it is
+			// On a schedule, cancel drops this occurrence (rm deletes the schedule).
+			if t.Schedule != nil {
+				if t.State == timer.Running || t.State == timer.Paused {
+					evs, err = t.AbortRun(now)
+					break
+				}
+				var exhausted bool
+				evs, exhausted, err = t.Skip(now)
+				if err == nil && exhausted {
+					st.Remove(name)
+					res.Deleted = true
+				}
+				break
+			}
+			fallthrough
+		case Rm:
+			// A finished countdown was already logged as done; removing it is
 			// just clearing it away.
 			if t.State != timer.Done {
 				evs = []timer.Event{t.Cancel(now)}
@@ -102,7 +130,7 @@ func (o Ops) Apply(name string, kind timer.Kind, verb string, until *time.Time) 
 				err = timer.ErrNoop{Msg: name + " is not ringing"}
 			}
 		default:
-			return fmt.Errorf("unknown verb %q (start, pause, restart, cancel, skip)", verb)
+			return fmt.Errorf("unknown verb %q (%s)", verb, Verbs)
 		}
 		if err != nil {
 			return err

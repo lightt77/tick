@@ -148,7 +148,7 @@ func (d *Daemon) Step() error {
 			log.Printf("run log: %v", err)
 		}
 		for _, ev := range b.evs {
-			if title, msg, ok := Announcement(ev, b.t, d.settings.NagCount); ok {
+			if title, msg, ok := Announcement(ev, b.t); ok {
 				go func() {
 					if err := d.Player.Notify(title, msg); err != nil {
 						log.Printf("notify: %v", err)
@@ -197,7 +197,7 @@ func (d *Daemon) rings(st *store.State, now time.Time) map[string]alert.Ring {
 }
 
 // Announcement is the notification for an event, if it gets one.
-func Announcement(ev timer.Event, t *timer.Timer, nagCount int) (title, msg string, ok bool) {
+func Announcement(ev timer.Event, t *timer.Timer) (title, msg string, ok bool) {
 	label := t.Name
 	if t.Label != "" {
 		label = t.Name + " · " + t.Label
@@ -207,20 +207,29 @@ func Announcement(ev timer.Event, t *timer.Timer, nagCount int) (title, msg stri
 		if ev.Chime {
 			return "tick", fmt.Sprintf("%s: another %s", t.Name, Short(time.Duration(t.Duration))), true
 		}
-		if t.Duration == 0 {
-			return "", "", false // a plain reminder acknowledged with start
+		if ev.User || t.Duration == 0 {
+			return "", "", false // the user did it, or a plain reminder was marked done
 		}
 		return "⏱ " + t.Name + " done", Short(time.Duration(t.Duration)) + " finished", true
 	case timer.EvDue:
-		msg := "Due now. Start it from the menu bar or: tick timer " + t.Name + " start"
+		msg := "Due now. Mark it done from the menu bar or: tick " + quote(t.Name) + " done"
+		if t.Duration > 0 {
+			msg = "Due now. Start it from the menu bar or: tick " + quote(t.Name) + " start"
+		}
 		if ev.Late {
 			msg = "Was due at " + ev.At.Local().Format("15:04") + " while the Mac slept. " + msg
 		}
 		return "⏰ " + label, msg, true
-	case timer.EvNag:
-		return "⏰ " + label, fmt.Sprintf("Still due since %s (reminder %d of %d)", ev.At.Local().Format("15:04"), t.Nags, nagCount), true
 	}
 	return "", "", false
+}
+
+// quote wraps a name that needs it so the hint can be pasted into a shell.
+func quote(name string) string {
+	if strings.ContainsAny(name, " \t\"'$&;|<>()*?#~`\\") {
+		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'"
+	}
+	return name
 }
 
 // Short formats a duration compactly: 15m, 1h30m, 45s.

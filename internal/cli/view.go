@@ -109,18 +109,21 @@ func statusText(t *timer.Timer, now time.Time, withMs bool) string {
 		s := clock(t.Remaining(now)) + " left"
 		if t.Repeat {
 			s += ", repeats every " + daemon.Short(time.Duration(t.Duration))
+			if t.Laps > 0 {
+				s += fmt.Sprintf(" · %d done", t.Laps)
+			}
 		}
 		return s
 	case t.State == timer.Paused:
 		return clock(t.Remaining(now)) + " left, paused"
 	case t.State == timer.Done:
-		return "finished"
+		return "finished (done clears it)"
 	case t.State == timer.Due:
 		s := "due since " + t.DueAt.Local().Format("15:04")
 		if t.Late {
 			s += " (fired late, after sleep)"
 		}
-		return s
+		return s + ", waiting for you (done or cancel)"
 	case t.Suspended && t.SuspendedUntil != nil:
 		return "schedule paused until " + whenText(*t.SuspendedUntil)
 	case t.Suspended:
@@ -194,7 +197,7 @@ func live(s *store.Store, name string, w io.Writer) error {
 			}
 			lastLoad = now
 			if t = st.Find(name); t == nil {
-				fmt.Fprintf(w, "\r\033[K%s  cancelled", name)
+				fmt.Fprintf(w, "\r\033[K%s  ended", name)
 				return nil
 			}
 		}

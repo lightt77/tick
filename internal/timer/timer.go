@@ -60,6 +60,7 @@ type Timer struct {
 	State    State              `json:"state"`
 	Duration Duration           `json:"duration,omitempty"` // full countdown; 0 for stopwatches and plain reminders
 	Repeat   bool               `json:"repeat,omitempty"`
+	Laps     int                `json:"laps,omitempty"` // finished laps of a repeating timer
 	Sound    string             `json:"sound,omitempty"`
 	Label    string             `json:"label,omitempty"`
 	Grace    Duration           `json:"grace,omitempty"`
@@ -73,8 +74,6 @@ type Timer struct {
 	NextAt         *time.Time `json:"next_at,omitempty"`         // next occurrence of the schedule
 	DueAt          *time.Time `json:"due_at,omitempty"`          // the occurrence that is due or being run
 	Late           bool       `json:"late,omitempty"`            // fired after waking, not on time
-	Nags           int        `json:"nags,omitempty"`            // alerts sent for the due occurrence
-	LastNagAt      *time.Time `json:"last_nag_at,omitempty"`     //
 	Suspended      bool       `json:"suspended,omitempty"`       // schedule paused
 	SuspendedUntil *time.Time `json:"suspended_until,omitempty"` // auto-resume time
 
@@ -87,8 +86,7 @@ type Timer struct {
 type Settings struct {
 	RingInterval time.Duration
 	RingCap      time.Duration
-	NagInterval  time.Duration
-	NagCount     int
+	DueRing      time.Duration // how long a due occurrence rings before it waits silently
 	Grace        time.Duration
 }
 
@@ -96,8 +94,7 @@ type Settings struct {
 var DefaultSettings = Settings{
 	RingInterval: 5 * time.Second,
 	RingCap:      2 * time.Minute,
-	NagInterval:  10 * time.Minute,
-	NagCount:     3,
+	DueRing:      20 * time.Second,
 	Grace:        2 * time.Hour,
 }
 
@@ -107,7 +104,6 @@ type EventKind string
 const (
 	EvFinished  EventKind = "done"      // a countdown ran to zero
 	EvDue       EventKind = "due"       // a scheduled occurrence fired
-	EvNag       EventKind = "nag"       // a due occurrence was re-announced
 	EvMissed    EventKind = "missed"    // an occurrence passed without being started
 	EvSkipped   EventKind = "skipped"   // an occurrence was skipped on purpose
 	EvCancelled EventKind = "cancelled" // the timer was deleted
@@ -122,6 +118,7 @@ type Event struct {
 	Late   bool
 	Note   string
 	Chime  bool // a repeating ticker lap: one short sound, no ring loop
+	User   bool // the user concluded it (done), so no notification
 }
 
 // ErrNoop reports a verb that changed nothing; the CLI prints it, exit code 0.
@@ -203,7 +200,7 @@ func (t *Timer) runFull(now time.Time) {
 }
 
 func (t *Timer) clearDue() {
-	t.DueAt, t.Late, t.Nags, t.LastNagAt = nil, false, 0, nil
+	t.DueAt, t.Late = nil, false
 }
 
 // Start creates nothing; it resumes, begins a due run, resumes a paused schedule,
@@ -333,16 +330,71 @@ func (t *Timer) Skip(now time.Time) (evs []Event, exhausted bool, err error) {
 	return evs, t.NextAt == nil && t.State == Scheduled, nil
 }
 
-// Cancel returns the event to log when the timer is deleted.
-func (t *Timer) Cancel(now time.Time) Event {
-	ev := Event{Kind: EvCancelled, Timer: t.Name, At: now}
+// ran is how long the timer has run in its current life: the stopwatch reading, or
+// the finished laps plus the part of the current countdown already used.
+func (t *Timer) ran(now time.Time) time.Duration {
 	switch {
 	case t.Kind == KindStopwatch:
-		ev.Amount = t.Elapsed(now)
+		return t.Elapsed(now)
 	case t.State == Running || t.State == Paused:
-		ev.Amount = time.Duration(t.Duration) - t.Remaining(now)
+		return time.Duration(t.Laps)*time.Duration(t.Duration) + time.Duration(t.Duration) - t.Remaining(now)
 	}
-	return ev
+	return 0
+}
+
+func (t *Timer) lapNote() string {
+	switch {
+	case t.Laps == 1:
+		return "1 lap"
+	case t.Laps > 1:
+		return fmt.Sprintf("%d laps", t.Laps)
+	}
+	return ""
+}
+
+// Cancel returns the event to log when the timer is deleted.
+func (t *Timer) Cancel(now time.Time) Event {
+	return Event{Kind: EvCancelled, Timer: t.Name, At: now, Amount: t.ran(now), Note: t.lapNote()}
+}
+
+// AbortRun stops a countdown that a schedule started (an early run, or one begun
+// from a due occurrence) and returns the schedule to waiting. The schedule stays.
+func (t *Timer) AbortRun(now time.Time) ([]Event, error) {
+	if t.Schedule == nil || (t.State != Running && t.State != Paused) {
+		return nil, fmt.Errorf("%s has no run to cancel", t.Name)
+	}
+	ev := t.Cancel(now)
+	t.State, t.Banked, t.Since, t.Ringing, t.Updated = Scheduled, 0, nil, nil, now
+	t.clearDue()
+	return []Event{ev}, nil
+}
+
+// Done concludes the timer: a stopwatch or a countdown is logged as done with the
+// time it ran, a repeating timer with its lap count, and a due occurrence of a
+// schedule is marked done. remove=true means nothing is left and it should be deleted.
+func (t *Timer) Done(now time.Time) (evs []Event, remove bool, err error) {
+	defer func() { t.Updated = now }()
+	t.Ringing = nil
+	ev := Event{Kind: EvFinished, Timer: t.Name, At: now, User: true}
+	switch {
+	case t.Schedule != nil:
+		switch t.State {
+		case Due:
+			ev.Late = t.Late
+			t.clearDue()
+		case Running, Paused:
+			ev.Amount = t.ran(now)
+			t.Banked, t.Since = 0, nil
+		default:
+			return nil, false, ErrNoop{fmt.Sprintf("%s has nothing pending; next at %s (cancel skips it)", t.Name, fmtWhen(t.NextAt))}
+		}
+		t.State = Scheduled
+		return []Event{ev}, t.NextAt == nil && !t.Suspended, nil
+	case t.State == Done:
+		return nil, true, nil // a countdown that rang was already logged as done
+	}
+	ev.Amount, ev.Note = t.ran(now), t.lapNote()
+	return []Event{ev}, true, nil
 }
 
 // Silence stops the alert sound and nothing else.
@@ -356,7 +408,8 @@ func (t *Timer) Silence(now time.Time) bool {
 }
 
 // Advance moves the timer to now: countdowns finish, rings time out, schedules
-// fire (with the grace window after a sleep), due occurrences nag and then lapse.
+// fire (with the grace window after a sleep) and ring once, then a due occurrence
+// waits until the user marks it done or skips it, or the next occurrence replaces it.
 // remove=true means the timer is finished for good and should be deleted.
 func (t *Timer) Advance(now time.Time, cfg Settings) (evs []Event, changed, remove bool) {
 	before, _ := json.Marshal(t)
@@ -378,6 +431,7 @@ func (t *Timer) Advance(now time.Time, cfg Settings) (evs []Event, changed, remo
 				next = now
 			}
 			t.Banked, t.Since = t.Duration, ptr(next)
+			t.Laps++
 			ev.Chime = true
 			t.Ringing = &Ringing{Since: now, Until: now}
 		case t.Schedule != nil:
@@ -423,8 +477,8 @@ func (t *Timer) Advance(now time.Time, cfg Settings) (evs []Event, changed, remo
 					evs = append(evs, Event{Kind: EvMissed, Timer: t.Name, At: *t.DueAt, Note: "next occurrence arrived"})
 				}
 				late := now.Sub(latest) > 90*time.Second
-				t.State, t.DueAt, t.Late, t.Nags, t.LastNagAt = Due, ptr(latest), late, 1, ptr(now)
-				t.Ringing = nagRing(now, cfg)
+				t.State, t.DueAt, t.Late = Due, ptr(latest), late
+				t.Ringing = dueRing(now, cfg)
 				evs = append(evs, Event{Kind: EvDue, Timer: t.Name, At: latest, Late: late})
 			}
 			t.NextAt = nil
@@ -433,21 +487,7 @@ func (t *Timer) Advance(now time.Time, cfg Settings) (evs []Event, changed, remo
 			}
 		}
 
-		// 4. Nagging a due occurrence, then letting it lapse.
-		if t.State == Due && t.LastNagAt != nil && now.Sub(*t.LastNagAt) >= cfg.NagInterval {
-			if t.Nags >= cfg.NagCount {
-				evs = append(evs, Event{Kind: EvMissed, Timer: t.Name, At: *t.DueAt, Note: "not started"})
-				t.clearDue()
-				t.State = Scheduled
-			} else {
-				t.Nags++
-				t.LastNagAt = ptr(now)
-				t.Ringing = nagRing(now, cfg)
-				evs = append(evs, Event{Kind: EvNag, Timer: t.Name, At: *t.DueAt, Late: t.Late})
-			}
-		}
-
-		// 5. Nothing left to wait for.
+		// 4. Nothing left to wait for.
 		if t.State == Scheduled && !t.Suspended && t.NextAt == nil && t.Ringing == nil {
 			remove = true
 		}
@@ -461,9 +501,9 @@ func (t *Timer) Advance(now time.Time, cfg Settings) (evs []Event, changed, remo
 	return evs, changed, remove
 }
 
-// A nag rings three times, ring_interval apart.
-func nagRing(now time.Time, cfg Settings) *Ringing {
-	return &Ringing{Since: now, Until: now.Add(2*cfg.RingInterval + cfg.RingInterval/2)}
+// A due occurrence rings for due_ring, then waits quietly for the user.
+func dueRing(now time.Time, cfg Settings) *Ringing {
+	return &Ringing{Since: now, Until: now.Add(cfg.DueRing)}
 }
 
 func fmtWhen(t *time.Time) string {

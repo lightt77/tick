@@ -70,9 +70,9 @@ func TestRowsAndActions(t *testing.T) {
 		t.Fatalf("%d rows", len(rows))
 	}
 	want := []struct{ section, text, actions string }{
-		{"Running", "pasta  04:00", "Pause,Restart,Cancel"},
-		{"Paused", "tea  09:00 left", "Resume,Restart,Cancel"},
-		{"Scheduled", "guitar  today 18:30 · Daily 18:30", "Start now,Skip next,Pause schedule,Cancel"},
+		{"Running", "pasta  04:00", "Pause,Restart,Done,Cancel"},
+		{"Paused", "tea  09:00 left", "Resume,Restart,Done,Cancel"},
+		{"Scheduled", "guitar  today 18:30 · Daily 18:30", "Start now,Skip next,Pause schedule,Remove schedule"},
 	}
 	for i, w := range want {
 		var labels []string
@@ -93,6 +93,22 @@ func TestRowsAndActions(t *testing.T) {
 	}
 	if Signature(rows, "Glass") == before {
 		t.Fatal("signature did not change with the menu shape")
+	}
+}
+
+func TestDueReminderIsMarkedDone(t *testing.T) {
+	s, _ := schedule.New([]string{"FREQ=DAILY;BYHOUR=9;BYMINUTE=0"}, nil, t0)
+	g, _ := timer.NewScheduled("meds", 0, s, t0)
+	when := time.Date(2026, 11, 17, 9, 0, 0, 0, time.Local)
+	g.Advance(when, timer.DefaultSettings)
+	g.Advance(when.Add(time.Minute), timer.DefaultSettings) // the ring is over, still pending
+	rows := Rows(&store.State{Timers: []*timer.Timer{g}}, when.Add(time.Minute))
+	var labels []string
+	for _, a := range rows[0].Actions {
+		labels = append(labels, a.Label)
+	}
+	if rows[0].Section != "Due" || strings.Join(labels, ",") != "Done,Skip,Pause schedule,Remove schedule" {
+		t.Fatalf("due reminder row %s %v", rows[0].Section, labels)
 	}
 }
 

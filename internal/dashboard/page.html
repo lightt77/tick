@@ -187,7 +187,7 @@ function runningCard(t) {
   bar.appendChild(fill);
   c.appendChild(bar);
   var r = el("div", "row");
-  r.appendChild(el("span", "l", "of " + dur(t.duration_ms) + (t.repeat ? " · repeats" : "")));
+  r.appendChild(el("span", "l", "of " + dur(t.duration_ms) + (t.repeat ? " · repeats" + (t.laps ? " · " + t.laps + " done" : "") : "")));
   var ends = el("span", null, "");
   r.appendChild(ends);
   c.appendChild(r);
@@ -214,6 +214,7 @@ function attnCard(t) {
   var msg = t.state === "due" ? "Due since " + hhmm(t.due_ms) : t.state === "done" ? "Finished" : "Ringing";
   c.appendChild(el("div", "clock", msg));
   if (t.duration_ms) c.appendChild(el("div", "sub", dur(t.duration_ms)));
+  c.appendChild(el("div", "sub", "waiting for you · tick " + t.name + (t.state === "due" ? " done" : " done to clear")));
   nextRow(c, t);
   return c;
 }

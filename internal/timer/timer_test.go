@@ -197,16 +197,128 @@ func TestScheduledHabitFlow(t *testing.T) {
 	}
 }
 
-func TestDueNagsThenLapses(t *testing.T) {
-	tm := daily(t, 15*time.Minute, at("2026-11-16 08:00:00"), "FREQ=DAILY;BYHOUR=18;BYMINUTE=30")
+func TestDueRingsOnceThenWaitsForTheUser(t *testing.T) {
+	tm := daily(t, 0, at("2026-11-16 08:00:00"), "FREQ=DAILY;BYHOUR=18;BYMINUTE=30")
 	tm.Advance(at("2026-11-16 18:30:00"), cfg)
-	evs, _, _ := tm.Advance(at("2026-11-16 18:40:00"), cfg)
-	wantKinds(t, evs, EvNag)
-	evs, _, _ = tm.Advance(at("2026-11-16 18:50:00"), cfg)
-	wantKinds(t, evs, EvNag)
-	evs, _, _ = tm.Advance(at("2026-11-16 19:00:00"), cfg)
-	wantKinds(t, evs, EvMissed)
+	wantState(t, tm, Due)
+	if r := tm.Ringing; r == nil || r.Until.Sub(r.Since) != 20*time.Second {
+		t.Fatalf("a due occurrence rings for due_ring, got %+v", tm.Ringing)
+	}
+	// Hours later it is still pending: no nag, no lapse, and the ring has stopped.
+	evs, _, _ := tm.Advance(at("2026-11-16 23:00:00"), cfg)
+	wantKinds(t, evs)
+	wantState(t, tm, Due)
+	if tm.Ringing != nil {
+		t.Fatal("the ring stops after due_ring")
+	}
+	// The next occurrence arrives first: the old one is logged missed, the new one is due.
+	evs, _, _ = tm.Advance(at("2026-11-17 18:30:00"), cfg)
+	wantKinds(t, evs, EvMissed, EvDue)
+	if !evs[0].At.Equal(at("2026-11-16 18:30:00")) {
+		t.Fatalf("missed %v", evs[0].At)
+	}
+	wantState(t, tm, Due)
+}
+
+func TestDoneOnADueOccurrence(t *testing.T) {
+	tm := daily(t, 0, at("2026-11-16 08:00:00"), "FREQ=DAILY;BYHOUR=18;BYMINUTE=30")
+	if _, _, err := tm.Done(at("2026-11-16 12:00:00")); !IsNoop(err) {
+		t.Fatalf("done with nothing pending: %v", err)
+	}
+	tm.Advance(at("2026-11-16 18:30:00"), cfg)
+	evs, remove, err := tm.Done(at("2026-11-16 21:00:00"))
+	if err != nil || remove {
+		t.Fatal(err, remove)
+	}
+	wantKinds(t, evs, EvFinished)
+	if !evs[0].User {
+		t.Fatal("a user-concluded run must not announce itself")
+	}
 	wantState(t, tm, Scheduled)
+	if tm.Ringing != nil || tm.DueAt != nil {
+		t.Fatal("done clears the pending occurrence and its ring")
+	}
+}
+
+func TestDoneOnTheLastOccurrenceRemoves(t *testing.T) {
+	when := at("2026-11-20 09:00:00")
+	s, _ := schedule.New(nil, &when, at("2026-11-16 08:00:00"))
+	tm, _ := NewScheduled("dentist", 0, s, at("2026-11-16 08:00:00"))
+	tm.Advance(when, cfg)
+	if _, remove, err := tm.Done(when.Add(time.Minute)); err != nil || !remove {
+		t.Fatalf("remove=%v err=%v", remove, err)
+	}
+}
+
+func TestCancelOfAScheduleRunKeepsTheSchedule(t *testing.T) {
+	tm := daily(t, 15*time.Minute, at("2026-11-16 08:00:00"), "FREQ=DAILY;BYHOUR=18;BYMINUTE=30")
+	tm.Start(at("2026-11-16 17:00:00"))
+	evs, err := tm.AbortRun(at("2026-11-16 17:05:00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKinds(t, evs, EvCancelled)
+	if evs[0].Amount != 5*time.Minute {
+		t.Fatalf("amount %v", evs[0].Amount)
+	}
+	wantState(t, tm, Scheduled)
+	if tm.NextAt == nil {
+		t.Fatal("the schedule stays")
+	}
+}
+
+func TestStopwatchDone(t *testing.T) {
+	sw := NewStopwatch("work", at("2026-11-16 09:00:00"))
+	evs, remove, err := sw.Done(at("2026-11-16 10:30:00"))
+	if err != nil || !remove {
+		t.Fatal(err, remove)
+	}
+	wantKinds(t, evs, EvFinished)
+	if evs[0].Amount != 90*time.Minute {
+		t.Fatalf("amount %v", evs[0].Amount)
+	}
+}
+
+func TestCountdownDoneEarlyAndAfterRinging(t *testing.T) {
+	tm, _ := NewCountdown("pasta", 10*time.Minute, false, at("2026-11-16 09:00:00"))
+	evs, remove, err := tm.Done(at("2026-11-16 09:04:00"))
+	if err != nil || !remove {
+		t.Fatal(err, remove)
+	}
+	wantKinds(t, evs, EvFinished)
+	if evs[0].Amount != 4*time.Minute {
+		t.Fatalf("amount %v", evs[0].Amount)
+	}
+
+	// Once it has rung it was already logged as done; clearing it logs nothing more.
+	tm, _ = NewCountdown("pasta", 10*time.Minute, false, at("2026-11-16 09:00:00"))
+	tm.Advance(at("2026-11-16 09:10:00"), cfg)
+	wantState(t, tm, Done)
+	evs, remove, err = tm.Done(at("2026-11-16 09:11:00"))
+	if err != nil || !remove || len(evs) != 0 {
+		t.Fatal(evs, remove, err)
+	}
+}
+
+func TestRepeatingTimerCountsLaps(t *testing.T) {
+	tm, _ := NewCountdown("water", 10*time.Minute, true, at("2026-11-16 09:00:00"))
+	tm.Advance(at("2026-11-16 09:10:00"), cfg)
+	tm.Advance(at("2026-11-16 09:20:00"), cfg)
+	tm.Advance(at("2026-11-16 09:30:00"), cfg)
+	if tm.Laps != 3 {
+		t.Fatalf("laps %d", tm.Laps)
+	}
+	evs, remove, err := tm.Done(at("2026-11-16 09:34:00"))
+	if err != nil || !remove {
+		t.Fatal(err, remove)
+	}
+	if evs[0].Note != "3 laps" || evs[0].Amount != 34*time.Minute {
+		t.Fatalf("note %q amount %v", evs[0].Note, evs[0].Amount)
+	}
+	ev := tm.Cancel(at("2026-11-16 09:34:00"))
+	if ev.Note != "3 laps" {
+		t.Fatalf("cancel note %q", ev.Note)
+	}
 }
 
 func TestGraceWindow(t *testing.T) {
