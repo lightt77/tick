@@ -23,6 +23,20 @@ type Entry struct {
 	Note    string    `json:"note,omitempty"`
 	Outcome string    `json:"outcome"`
 	Kind    string    `json:"kind"`
+	Detail  *Detail   `json:"detail,omitempty"` // a focus session's breakdown; absent on other lines
+}
+
+// Detail is the breakdown a Focus cube session leaves with its single line.
+type Detail struct {
+	Laps     map[string]LapCount `json:"laps,omitempty"` // per lap length, e.g. "5m"
+	Breaks   int                 `json:"breaks,omitempty"`
+	BreakMin float64             `json:"break_min,omitempty"`
+}
+
+// LapCount is how many laps of one length were finished or thrown away.
+type LapCount struct {
+	Done  int `json:"done,omitempty"`
+	Reset int `json:"reset,omitempty"`
 }
 
 // FromEvent turns an event worth keeping into an entry. Due and nag alerts are not

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -240,5 +242,95 @@ func TestPendingScheduleVerbs(t *testing.T) {
 	e.must("guitar", "rm")
 	if e.state().Find("guitar") != nil {
 		t.Fatal("rm deletes the schedule")
+	}
+}
+
+func TestFocusSessionFromTheCommandLine(t *testing.T) {
+	e := newEnv(t)
+	if out := e.must("focus"); !strings.Contains(out, "No focus session") {
+		t.Fatalf("idle: %q", out)
+	}
+	e.fails("no focus session", "focus", "pause")
+
+	out := e.must("focus", "start", "5m")
+	if !strings.Contains(out, "focus: running · 5m lap, 04:5") && !strings.Contains(out, "focus: running · 5m lap, 05:00") {
+		t.Fatalf("start: %q", out)
+	}
+	if f := e.state().Focus; f == nil || f.LapLen() != 5*time.Minute || len(f.Rungs()) != 6 {
+		t.Fatalf("session %+v", f)
+	}
+	e.fails("already running", "focus", "start")
+	if _, err := e.run("focus", "resume"); !timer.IsNoop(err) || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("a no-op comes back as ErrNoop (printed, exit 0): %v", err)
+	}
+
+	e.must("focus", "up")
+	e.must("focus", "down")
+	e.must("focus", "down")
+	e.must("focus", "reset")
+	if f := e.state().Focus; f.Laps["1m"].Reset != 1 || f.LapLen() != time.Minute {
+		t.Fatalf("after up, down, down, reset: %+v", f)
+	}
+	if _, err := e.run("focus", "down"); !timer.IsNoop(err) || !strings.Contains(err.Error(), "shortest") {
+		t.Fatalf("bottom of the ladder: %v", err)
+	}
+
+	e.must("focus", "pause")
+	if out := e.must("focus"); !strings.Contains(out, "paused") {
+		t.Fatalf("paused: %q", out)
+	}
+	e.must("focus", "break", "7m")
+	if out := e.must("focus"); !strings.Contains(out, "on a break · 06:5") && !strings.Contains(out, "on a break · 07:00") {
+		t.Fatalf("break: %q", out)
+	}
+	e.fails("on a break", "focus", "pause")
+	e.fails("break length", "focus", "break", "soon")
+	e.must("focus", "resume")
+
+	var v FocusView
+	if err := json.Unmarshal([]byte(e.must("focus", "--json")), &v); err != nil {
+		t.Fatal(err)
+	}
+	if !v.Active || v.State != "running" || v.Lap != "1m" || v.Breaks != 1 || v.Laps["1m"].Reset != 1 || len(v.Ladder) != 6 {
+		t.Fatalf("json %+v", v)
+	}
+	if !strings.Contains(e.must(), "focus: running") {
+		t.Fatal("the overview does not show the session")
+	}
+
+	out = e.must("focus", "done")
+	if !strings.Contains(out, "focus done") || !strings.Contains(out, "0 laps, 1 break") {
+		t.Fatalf("done: %q", out)
+	}
+	if e.state().Focus != nil {
+		t.Fatal("still there after done")
+	}
+	log, err := runlog.Since(paths.RunLog(), time.Time{})
+	if err != nil || len(log) != 1 || log[0].Tag != "focus" || log[0].Detail == nil || log[0].Detail.Breaks != 1 {
+		t.Fatalf("run log %+v %v", log, err)
+	}
+}
+
+func TestFocusStartRefusesAnUnknownRungAndATimerCannotBeNamedFocus(t *testing.T) {
+	e := newEnv(t)
+	e.fails("no 7m lap", "focus", "start", "7m")
+	e.fails("above zero", "focus", "start", "0s")
+	e.fails("is a command", "timer", "focus", "start", "5m")
+	e.fails("at most 1 arg", "focus", "start", "1m", "2m")
+}
+
+func TestFocusUsesTheConfiguredLadder(t *testing.T) {
+	e := newEnv(t)
+	if err := os.WriteFile(paths.Config(), []byte("focus_steps = [\"2m\", \"20m\"]\nfocus_breaks = [\"3m\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.must("focus", "start", "20m")
+	if f := e.state().Focus; f == nil || len(f.Rungs()) != 2 || f.LapLen() != 20*time.Minute || f.BreakChoices()[0] != 3*time.Minute {
+		t.Fatalf("%+v", f)
+	}
+	e.must("focus", "break")
+	f := e.state().Focus
+	if f.BreakRemaining(time.Now()) < 2*time.Minute+50*time.Second {
+		t.Fatalf("the default break is the first focus_breaks choice: %v", f.BreakRemaining(time.Now()))
 	}
 }

@@ -56,7 +56,7 @@ var verbs = map[string]string{
 var reserved = map[string]bool{
 	"t": true, "s": true, "schedule": true, "status": true, "silence": true, "sounds": true,
 	"dashboard": true, "daemon": true, "help": true, "completion": true, "timer": true,
-	"stopwatch": true, "list": true,
+	"stopwatch": true, "list": true, "focus": true,
 }
 
 func isReserved(name string) bool {

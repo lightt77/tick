@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/schedule"
 	"github.com/lightt77/tick/internal/store"
 	"github.com/lightt77/tick/internal/timer"
@@ -180,5 +181,135 @@ func TestSignatureFollowsSound(t *testing.T) {
 	rows := Rows(&store.State{}, t0)
 	if Signature(rows, "Glass") == Signature(rows, "Hero") {
 		t.Fatal("changing the sound must rebuild the menu")
+	}
+}
+
+func focusSession(rung int) *focus.Session {
+	s, _ := focus.New([]time.Duration{time.Minute, 5 * time.Minute, 10 * time.Minute},
+		[]time.Duration{5 * time.Minute, 10 * time.Minute}, rung, t0)
+	return s
+}
+
+func focusLabels(r *FocusRow) string {
+	var out []string
+	for _, a := range r.Actions {
+		out = append(out, a.Label)
+	}
+	return strings.Join(out, ",")
+}
+
+func TestFocusMenuPerState(t *testing.T) {
+	if FocusMenu(nil, t0) != nil {
+		t.Fatal("no session, no row")
+	}
+	now := t0.Add(time.Minute + 30*time.Second)
+
+	s := focusSession(1)
+	r := FocusMenu(s, now)
+	if r.Text != "Focus  ◉ 5m  03:30 left · 01:30 focused" {
+		t.Fatalf("running text %q", r.Text)
+	}
+	if got := focusLabels(r); got != "Pause,Longer lap (10m),Shorter lap (1m),Reset lap,Break 5m,Break 10m,Done,Cancel" {
+		t.Fatalf("running: %s", got)
+	}
+	// The ends of the ladder offer only the way that exists.
+	if got := focusLabels(FocusMenu(focusSession(0), t0)); got != "Pause,Longer lap (5m),Reset lap,Break 5m,Break 10m,Done,Cancel" {
+		t.Fatalf("bottom rung: %s", got)
+	}
+	if got := focusLabels(FocusMenu(focusSession(2), t0)); got != "Pause,Shorter lap (5m),Reset lap,Break 5m,Break 10m,Done,Cancel" {
+		t.Fatalf("top rung: %s", got)
+	}
+
+	s.Pause(now)
+	r = FocusMenu(s, now)
+	if !strings.HasPrefix(r.Text, "Focus  ⏸ 5m") || r.Actions[0].Label != "Resume" || r.Actions[0].Verb != "resume" {
+		t.Fatalf("paused: %q %s", r.Text, focusLabels(r))
+	}
+	s.Resume(now)
+
+	s.TakeBreak(now, 5*time.Minute)
+	r = FocusMenu(s, now.Add(time.Minute))
+	if r.Text != "Focus  ☕ break  04:00 left · 01:30 focused" {
+		t.Fatalf("break text %q", r.Text)
+	}
+	if got := focusLabels(r); got != "Resume focus,Restart break 5m,Restart break 10m,Done,Cancel" {
+		t.Fatalf("break: %s", got)
+	}
+	if r.Actions[1].Verb != "break" || r.Actions[2].Dur != 10*time.Minute {
+		t.Fatalf("restart break carries its length: %+v", r.Actions)
+	}
+
+	over := now.Add(5 * time.Minute) // the break ends exactly here
+	s.Advance(over)
+	r = FocusMenu(s, over.Add(30*time.Second))
+	if !strings.HasPrefix(r.Text, "Focus  break over 00:30 ago") {
+		t.Fatalf("break over text %q", r.Text)
+	}
+	if got := focusLabels(r); got != "Silence,Resume focus,Restart break 5m,Restart break 10m,Done,Cancel" {
+		t.Fatalf("break over: %s", got)
+	}
+	s.Silence(over)
+	if got := focusLabels(FocusMenu(s, over)); strings.HasPrefix(got, "Silence") {
+		t.Fatalf("nothing to silence: %s", got)
+	}
+}
+
+func TestFocusTitle(t *testing.T) {
+	now := t0.Add(time.Minute + 30*time.Second)
+	st := &store.State{Focus: focusSession(1)}
+	if got := Title(st, now); got != "◉ 5m 03:30" {
+		t.Fatalf("running: %q", got)
+	}
+	// The cube outranks an ordinary countdown, but not something that needs you.
+	st.Timers = append(st.Timers, countdown("pasta", 2*time.Minute, t0))
+	if got := Title(st, now); got != "◉ 5m 03:30" {
+		t.Fatalf("over a countdown: %q", got)
+	}
+	st.Focus.Pause(now)
+	if got := Title(st, now); got != "⏸ 5m 03:30" {
+		t.Fatalf("paused: %q", got)
+	}
+	st.Focus.Resume(now)
+	st.Focus.TakeBreak(now, 5*time.Minute)
+	if got := Title(st, now.Add(time.Minute)); got != "☕ 04:00" {
+		t.Fatalf("break: %q", got)
+	}
+	st.Focus.Advance(now.Add(6 * time.Minute))
+	if got := Title(st, now.Add(6*time.Minute)); got != "⏰ break over" {
+		t.Fatalf("break over: %q", got)
+	}
+	ringing := countdown("bread", time.Minute, t0)
+	ringing.Advance(t0.Add(time.Minute), timer.DefaultSettings)
+	st.Timers = append(st.Timers, ringing)
+	if got := Title(st, now.Add(6*time.Minute)); got != "⏰ bread +1" && got != "⏰ break over +1" {
+		t.Fatalf("two things need you: %q", got)
+	}
+}
+
+func TestFocusSignatureIgnoresTickingAndFollowsShape(t *testing.T) {
+	steps := []time.Duration{time.Minute, 5 * time.Minute}
+	s := focusSession(1)
+	a := FocusSignature(FocusMenu(s, t0.Add(time.Second)), steps)
+	b := FocusSignature(FocusMenu(s, t0.Add(2*time.Second)), steps)
+	if a != b {
+		t.Fatal("the menu would be rebuilt every second")
+	}
+	s.Pause(t0.Add(3 * time.Second))
+	if FocusSignature(FocusMenu(s, t0.Add(3*time.Second)), steps) == a {
+		t.Fatal("pausing changes the menu")
+	}
+	idle := FocusSignature(nil, steps)
+	if idle == a || idle == FocusSignature(nil, steps[:1]) {
+		t.Fatal("the idle menu must follow the ladder")
+	}
+	var labels []string
+	for _, st := range FocusStarts(steps) {
+		labels = append(labels, st.Label)
+		if st.Verb != "start" || st.Dur == 0 {
+			t.Fatalf("%+v", st)
+		}
+	}
+	if strings.Join(labels, ",") != "Start at 1m,Start at 5m" {
+		t.Fatalf("%v", labels)
 	}
 }

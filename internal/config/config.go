@@ -24,20 +24,41 @@ type Config struct {
 	DueRing      string  `toml:"due_ring"` // how long a due occurrence rings
 	Grace        string  `toml:"grace"`
 	SoundsDir    string  `toml:"sounds_dir"` // your own sounds, listed first
+
+	// Focus cube: the lap ladder (ascending) and the break choices.
+	FocusSteps  []string `toml:"focus_steps"`
+	FocusBreaks []string `toml:"focus_breaks"`
+
+	// Steps and Breaks are FocusSteps and FocusBreaks parsed by Load.
+	Steps  []time.Duration `toml:"-"`
+	Breaks []time.Duration `toml:"-"`
 }
 
 // Defaults used for any key the file leaves out.
 var Defaults = Config{
 	Sound: "Glass", Volume: 0.8, RingInterval: "5s", RingCap: "2m",
 	DueRing: "20s", Grace: "2h",
+	FocusSteps:  []string{"1m", "5m", "10m", "15m", "30m", "1h"},
+	FocusBreaks: []string{"5m", "10m", "15m", "30m"},
+	Steps:       []time.Duration{time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour},
+	Breaks:      []time.Duration{5 * time.Minute, 10 * time.Minute, 15 * time.Minute, 30 * time.Minute},
 }
 
 // Load reads path (a missing file means all defaults) and returns the config and
 // the timer settings derived from it.
 func Load(path string) (Config, timer.Settings, error) {
 	c := Defaults
+	// The decoder writes into an existing slice in place, which would change
+	// Defaults itself; so decode the lists into empty ones and fall back after.
+	c.FocusSteps, c.FocusBreaks = nil, nil
 	if _, err := toml.DecodeFile(path, &c); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Defaults, timer.DefaultSettings, fmt.Errorf("%s: %v", path, err)
+	}
+	if c.FocusSteps == nil {
+		c.FocusSteps = append([]string(nil), Defaults.FocusSteps...)
+	}
+	if c.FocusBreaks == nil {
+		c.FocusBreaks = append([]string(nil), Defaults.FocusBreaks...)
 	}
 	if strings.HasPrefix(c.SoundsDir, "~/") {
 		home, _ := os.UserHomeDir()
@@ -63,7 +84,35 @@ func Load(path string) (Config, timer.Settings, error) {
 		}
 		*f.dst = d
 	}
+	var err error
+	if c.Steps, err = durationList(path, "focus_steps", c.FocusSteps, true); err != nil {
+		return Defaults, timer.DefaultSettings, err
+	}
+	if c.Breaks, err = durationList(path, "focus_breaks", c.FocusBreaks, false); err != nil {
+		return Defaults, timer.DefaultSettings, err
+	}
 	return c, s, nil
+}
+
+// durationList parses a list of durations like ["1m", "5m"]. It must not be empty
+// and every entry must be above zero; the ladder must also be strictly ascending,
+// because "up" and "down" move along it.
+func durationList(path, key string, in []string, ascending bool) ([]time.Duration, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("%s: %s must list at least one duration", path, key)
+	}
+	out := make([]time.Duration, 0, len(in))
+	for _, s := range in {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("%s: %s has %q, which is not a duration like 5m or 1h", path, key, s)
+		}
+		if ascending && len(out) > 0 && d <= out[len(out)-1] {
+			return nil, fmt.Errorf("%s: %s must go from shortest to longest (%q is not longer than %q)", path, key, s, in[len(out)-1])
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 var soundLine = regexp.MustCompile(`^\s*sound\s*=`)

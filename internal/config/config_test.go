@@ -109,3 +109,37 @@ func TestOldNagKeysAreIgnored(t *testing.T) {
 		t.Fatalf("an old config must still load: %v", err)
 	}
 }
+
+func TestFocusListsDefaultAndOverride(t *testing.T) {
+	c, _, err := Load(write(t, ""))
+	if err != nil || len(c.Steps) != 6 || c.Steps[0] != time.Minute || c.Steps[5] != time.Hour || len(c.Breaks) != 4 {
+		t.Fatalf("defaults: %+v %v", c, err)
+	}
+	c, _, err = Load(write(t, "focus_steps = [\"2m\", \"20m\"]\nfocus_breaks = [\"3m\"]\n"))
+	if err != nil || len(c.Steps) != 2 || c.Steps[1] != 20*time.Minute || len(c.Breaks) != 1 || c.Breaks[0] != 3*time.Minute {
+		t.Fatalf("override: %+v %v", c, err)
+	}
+	// The override must not leak into the defaults.
+	if len(Defaults.Steps) != 6 || Defaults.FocusSteps[1] != "5m" {
+		t.Fatalf("defaults changed: %+v", Defaults)
+	}
+	c, _, _ = Load(write(t, ""))
+	if len(c.Steps) != 6 {
+		t.Fatalf("a later load sees the defaults again: %+v", c.Steps)
+	}
+}
+
+func TestFocusListsRejectBadValues(t *testing.T) {
+	for _, bad := range []string{
+		`focus_steps = []`, `focus_breaks = []`, `focus_steps = ["soon"]`, `focus_breaks = ["0s"]`,
+		`focus_steps = ["5m", "1m"]`, `focus_steps = ["5m", "5m"]`, `focus_steps = ["-1m"]`,
+	} {
+		if _, _, err := Load(write(t, bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	// Breaks need not be ordered.
+	if _, _, err := Load(write(t, `focus_breaks = ["30m", "5m"]`)); err != nil {
+		t.Errorf("unordered breaks refused: %v", err)
+	}
+}

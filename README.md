@@ -38,6 +38,7 @@ tick pasta pause | resume | restart
 tick pasta done              # conclude it: logged as done with the time it ran (and laps)
 tick pasta cancel            # throw it away: logged as cancelled
 tick schedule                # set up a reminder by answering questions
+tick focus start             # Focus cube: a focus stopwatch with repeating laps (below)
 tick guitar done | cancel    # a reminder that rang: mark it done, or skip it
 tick guitar rm               # delete a whole schedule
 tick silence                 # stop all ringing
@@ -50,8 +51,8 @@ tick daemon --no-tray        # run in the foreground without the menu bar
 - A name is unique across timers and stopwatches. `tick pasta 10m` on a name that
   exists is an error; look at it with `tick pasta`.
 - Words that are commands or verbs (`t s schedule status silence sounds dashboard
-  daemon help completion timer stopwatch list start pause resume restart done cancel
-  rm skip`) and anything shaped like a duration (`10m`) can't be names. `tick t pasta
+  daemon help completion timer stopwatch list focus start pause resume restart done
+  cancel rm skip`) and anything shaped like a duration (`10m`) can't be names. `tick t pasta
   pause` and `tick s work done` spell the kind out and check it.
 - `tick 10m pause` acts on the unnamed countdown called `10m`; a plain `tick 10m`
   always makes a new one.
@@ -63,9 +64,11 @@ tick daemon --no-tray        # run in the foreground without the menu bar
 
 ### Menu bar
 
-- **Title:** whatever needs you first (`⏰ guitar`), else the soonest-finishing
-  countdown (`pasta 04:12`), else a running stopwatch (`work ↑12:03`), else `◷`.
-- **Menu:** every timer with the verbs valid right now.
+- **Title:** whatever needs you first (`⏰ guitar`, or `⏰ break over`), else a
+  running Focus cube (`◉ 5m 03:12`), else the soonest-finishing countdown
+  (`pasta 04:12`), else a running stopwatch (`work ↑12:03`), else `◷`.
+- **Menu:** the Focus cube first (a **Focus cube ▸** submenu to start one, or the
+  running session with its verbs), then every timer with the verbs valid right now.
 - **Sound ▸** picks the default alert sound. Your own sounds come first: the files
   in `sounds_dir` (this repo's `sounds/` folder; drop new files in and they appear
   in the menu right away). Then `~/Library/Sounds` and the macOS sounds, or
@@ -74,6 +77,47 @@ tick daemon --no-tray        # run in the foreground without the menu bar
   `config.toml`, keeping the rest of the file. A timer's own `--sound` still wins.
 - **Silence all** and **Quit tick** are at the bottom.
 
+### Focus cube
+
+A Pomodoro-style session: a **focus stopwatch** that runs the whole time, and a **lap
+timer** that chimes once and starts again each time it finishes. The laps sit on a
+ladder (1m, 5m, 10m, 15m, 30m, 1h), and you move up or down it as your attention
+allows. Only one session exists at a time.
+
+```sh
+tick focus start [5m]        # begin on the first rung, or on the one you name
+tick focus                   # where it is (--json for scripts and LLMs)
+tick focus up | down         # a longer or shorter lap; the lap restarts
+tick focus reset             # throw this lap away
+tick focus pause | resume
+tick focus break [10m]       # pause everything; again = restart the break
+tick focus done | cancel     # end it; both log one line
+tick focus silence
+```
+
+Or use the menu bar: **Focus cube ▸ Start at …**, then Pause, Longer lap, Shorter lap,
+Reset lap, Break …, Done and Cancel.
+
+- **Laps.** A lap end plays the sound once and posts no banner. The focus stopwatch keeps
+  going across laps. The session counts, per lap length, laps finished and laps reset.
+- **Up and down** keep the time you already spent as focus time, but the unfinished
+  lap is not counted. **Reset** is for "I got distracted": the lap restarts, the part
+  already run comes off the focus time (never below zero), and the lap length's reset
+  counter goes up.
+- **Break.** It pauses the focus stopwatch and the lap. When it ends tick rings every
+  `ring_interval` and posts a banner until you answer: **Resume** (continues the paused
+  lap), **Restart break** (with any length) or **Done**. **Silence** stops the sound
+  only. Break time is the real time until you answer, so an overrun counts.
+- **Sleep.** If tick has not seen a running session for more than 2 minutes (the Mac
+  slept, or the daemon was not running), the session pauses at the last moment it was
+  seen, and a banner says so. Time nobody saw is never counted as focus.
+- **Done** (or **Cancel**) writes one line to `runs.jsonl`: `tag: "focus"`,
+  `kind: "focus"`, `amount` in focus minutes, a `note` like `16 laps, 2 breaks`, and a
+  `detail` object with the per-lap-length counts. The dashboard lists these as
+  **Focus sessions**.
+- The ladder and the break choices are `focus_steps` and `focus_breaks` in `config.toml`.
+  A session keeps the lists it started with.
+
 ### Dashboard
 
 ```sh
@@ -81,8 +125,8 @@ tick dashboard             # open the read-only page in your browser
 tick dashboard --no-open   # just write the files and print the path
 ```
 
-A detailed, read-only view: what needs you, running and paused timers with live
-clocks, every schedule with its next time, the next 14 days in one agenda, and the
+A detailed, read-only view: what needs you, the Focus cube with its live clocks and
+lap counts, recent focus sessions, running and paused timers with live clocks, every schedule with its next time, the next 14 days in one agenda, and the
 last 14 days of done, missed and skipped runs as a strip per habit. It is a plain
 HTML file with no server. A `file://` page cannot read `state.json`, so the daemon
 keeps `dashboard-data.js` next to it (rewritten when something changes, plus every
@@ -140,8 +184,8 @@ only by you:
 
 | File | What |
 |---|---|
-| `state.json` | all timers (CLI and daemon share it under an flock) |
-| `runs.jsonl` | one line per done, skipped, missed or cancelled run: `ts, tag, amount, unit, note, outcome, kind` (a repeating timer logs one `done` with `note: "7 laps"`) |
+| `state.json` | all timers and the Focus cube session (CLI and daemon share it under an flock) |
+| `runs.jsonl` | one line per done, skipped, missed or cancelled run: `ts, tag, amount, unit, note, outcome, kind` (a repeating timer logs one `done` with `note: "7 laps"`; a focus session adds a `detail` object) |
 | `config.toml` | optional settings, below |
 | `dashboard.html`, `dashboard-data.js` | the dashboard page and its data (your timer names and history; generated, safe to delete) |
 
@@ -158,6 +202,8 @@ ring_interval = "5s"     # between repeats of the sound
 ring_cap = "2m"          # a finished timer stops ringing after this
 due_ring = "20s"         # how long a due occurrence rings before it waits quietly
 grace = "2h"
+focus_steps = ["1m", "5m", "10m", "15m", "30m", "1h"]   # Focus cube laps, shortest first
+focus_breaks = ["5m", "10m", "15m", "30m"]              # Focus cube break choices
 ```
 
 `nag_interval` and `nag_count` from older configs are ignored. Per timer, `--sound` overrides `sound`. Notifications are posted by `osascript`, so
@@ -169,6 +215,7 @@ in System Settings → Notifications.
 ```
 cmd/tick            main
 internal/timer      the timer model and state machine (pure, tested)
+internal/focus      the Focus cube session and its state machine (pure, tested)
 internal/schedule   RRULE subset on top of teambition/rrule-go, multi-rule merge
 internal/store      state.json under flock, atomic writes
 internal/runlog     runs.jsonl

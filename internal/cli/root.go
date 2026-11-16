@@ -20,6 +20,7 @@ import (
 	"github.com/lightt77/tick/internal/config"
 	"github.com/lightt77/tick/internal/daemon"
 	"github.com/lightt77/tick/internal/dashboard"
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/launchd"
 	"github.com/lightt77/tick/internal/ops"
 	"github.com/lightt77/tick/internal/paths"
@@ -93,6 +94,7 @@ A background daemon (tick daemon install) rings, notifies and shows them in the 
   tick pasta pause|resume|restart|done|cancel
   tick guitar done           mark a due reminder done (cancel skips it, rm deletes the schedule)
   tick schedule              set up a reminder, with questions
+  tick focus                 Focus cube: a focus stopwatch with repeating laps (tick focus --help)
   tick pasta 10m --sound Hero --label "boil"
 
 A reminder from a script or an LLM: tick timer guitar start --rrule "FREQ=DAILY;BYHOUR=18;BYMINUTE=30"
@@ -110,7 +112,7 @@ The long forms (tick timer ..., tick stopwatch ..., tick 15m start) still work.`
 	f.StringVar(&a.f.label, "label", "", "with a duration: plain description shown in lists and the menu bar")
 	f.StringVar(&a.f.until, "until", "", `with pause: resume a schedule automatically, "YYYY-MM-DD [HH:MM]"`)
 	root.AddCommand(a.timerCmd(timer.KindTimer), a.timerCmd(timer.KindStopwatch),
-		a.scheduleCmd(), a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd(), a.dashboardCmd())
+		a.scheduleCmd(), a.focusCmd(), a.statusCmd(), a.silenceCmd(), a.soundsCmd(), a.daemonCmd(), a.dashboardCmd())
 	return root
 }
 
@@ -275,8 +277,8 @@ func validName(name string) error {
 	switch {
 	case strings.TrimSpace(name) == "":
 		return fmt.Errorf("a name cannot be empty")
-	case name == "list":
-		return fmt.Errorf(`"list" is a command, not a name`)
+	case name == "list" || name == "focus":
+		return fmt.Errorf(`%q is a command, not a name`, name)
 	case len(name) > 40:
 		return fmt.Errorf("names are at most 40 characters")
 	case strings.ContainsAny(name, "\n\t"):
@@ -732,6 +734,11 @@ func (a *app) runDaemon(noTray bool) error {
 					log.Printf("silence: %v", err)
 				}
 			},
+			Focus: func(verb string, d time.Duration) {
+				if err := focusFromMenu(o, verb, d); err != nil && !timer.IsNoop(err) {
+					log.Printf("menu focus %s: %v", verb, err)
+				}
+			},
 			Quit:        systray.Quit,
 			Sounds:      alert.SoundGroups,
 			SoundsStamp: alert.Stamp,
@@ -759,6 +766,25 @@ func (a *app) runDaemon(noTray bool) error {
 	})
 	log.Print("tick daemon stopped")
 	return nil
+}
+
+// focusFromMenu is a click in the Focus cube submenu. "start" carries the lap
+// length; the lists come from a fresh read of config.toml, like the CLI does.
+func focusFromMenu(o ops.Ops, verb string, d time.Duration) error {
+	if verb != "start" {
+		_, err := o.FocusDo(verb, d)
+		return err
+	}
+	c, _, err := config.Load(paths.Config())
+	if err != nil {
+		return err
+	}
+	rung, ok := focus.FindRung(c.Steps, d)
+	if !ok {
+		return fmt.Errorf("no %s lap on the ladder any more", d)
+	}
+	_, err = o.FocusStart(c.Steps, c.Breaks, rung)
+	return err
 }
 
 // setDefaultSound saves the default sound to config.toml (the daemon picks the

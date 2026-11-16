@@ -82,6 +82,13 @@ func overviewLines(st *store.State, now time.Time, kind timer.Kind) []string {
 			out = append(out, line)
 		}
 	}
+	if kind == "" && st.Focus != nil {
+		head := focusLines(st.Focus, now)
+		if len(out) > 0 {
+			head = append(head, "")
+		}
+		out = append(head, out...)
+	}
 	if len(out) == 0 {
 		return []string{"Nothing here yet. Try: tick pasta 10m"}
 	}

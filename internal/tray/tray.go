@@ -18,6 +18,10 @@ type Actions struct {
 	ChooseSound func()             // ask for a file, then set it
 	Sounds      func() (yours, others []string)
 	SoundsStamp func() string // changes when the sound folders do
+
+	// Focus applies a Focus cube verb ("start" with the lap length, or an ops.Focus*
+	// verb with the break length for "break").
+	Focus func(verb string, d time.Duration)
 }
 
 // Tray draws the menu bar item. Update may be called from any goroutine; systray
@@ -31,6 +35,18 @@ type Tray struct {
 	items map[string]*systray.MenuItem
 	texts map[string]string
 	stop  chan struct{}
+
+	steps     []time.Duration // the ladder offered when no session runs
+	focusItem *systray.MenuItem
+	focusText string
+}
+
+// SetFocusSteps tells the tray which lap lengths the idle "Focus cube" submenu offers.
+// The daemon calls it when the config is (re)loaded.
+func (t *Tray) SetFocusSteps(steps []time.Duration) {
+	t.mu.Lock()
+	t.steps = append([]time.Duration(nil), steps...)
+	t.mu.Unlock()
 }
 
 // New returns a tray; call it from systray's onReady.
@@ -51,14 +67,19 @@ func (t *Tray) Update(st *store.State, now time.Time, sound string) {
 		t.title = title
 	}
 	rows := Rows(st, now)
+	fr := FocusMenu(st.Focus, now)
 	stamp := ""
 	if t.acts.SoundsStamp != nil {
 		stamp = t.acts.SoundsStamp()
 	}
-	if sig := Signature(rows, sound+"|"+stamp); sig != t.sig {
-		t.rebuild(rows, sound)
+	if sig := Signature(rows, sound+"|"+stamp+"|"+FocusSignature(fr, t.steps)); sig != t.sig {
+		t.rebuild(rows, fr, sound)
 		t.sig = sig
 		return
+	}
+	if fr != nil && t.focusItem != nil && t.focusText != fr.Text {
+		t.focusItem.SetTitle(fr.Text)
+		t.focusText = fr.Text
 	}
 	for _, r := range rows {
 		if it := t.items[r.Name]; it != nil && t.texts[r.Name] != r.Text {
@@ -68,14 +89,32 @@ func (t *Tray) Update(st *store.State, now time.Time, sound string) {
 	}
 }
 
-func (t *Tray) rebuild(rows []Row, sound string) {
+func (t *Tray) rebuild(rows []Row, fr *FocusRow, sound string) {
 	if t.stop != nil {
 		close(t.stop)
 	}
 	t.stop = make(chan struct{})
 	t.items = map[string]*systray.MenuItem{}
 	t.texts = map[string]string{}
+	t.focusItem, t.focusText = nil, ""
 	systray.ResetMenu()
+
+	// The Focus cube comes first: a way to start one, or the running session.
+	if fr == nil {
+		it := systray.AddMenuItem("Focus cube", "A focus stopwatch with repeating laps")
+		for _, a := range FocusStarts(t.steps) {
+			verb, d := a.Verb, a.Dur
+			t.onClick(it.AddSubMenuItem(a.Label, ""), func() { t.focus(verb, d) })
+		}
+	} else {
+		it := systray.AddMenuItem(fr.Text, "")
+		t.focusItem, t.focusText = it, fr.Text
+		for _, a := range fr.Actions {
+			verb, d := a.Verb, a.Dur
+			t.onClick(it.AddSubMenuItem(a.Label, ""), func() { t.focus(verb, d) })
+		}
+	}
+	systray.AddSeparator()
 
 	section := ""
 	for _, r := range rows {
@@ -116,6 +155,12 @@ func (t *Tray) rebuild(rows []Row, sound string) {
 	t.onClick(sm.AddSubMenuItem("Choose file…", "Use your own sound file"), t.acts.ChooseSound)
 	t.onClick(systray.AddMenuItem("Silence all", ""), t.acts.SilenceAll)
 	t.onClick(systray.AddMenuItem("Quit tick", "Stops the daemon until next login"), t.acts.Quit)
+}
+
+func (t *Tray) focus(verb string, d time.Duration) {
+	if t.acts.Focus != nil {
+		t.acts.Focus(verb, d)
+	}
 }
 
 func (t *Tray) onClick(it *systray.MenuItem, fn func()) {

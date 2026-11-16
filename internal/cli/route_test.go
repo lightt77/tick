@@ -83,7 +83,7 @@ func TestCheckName(t *testing.T) {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "t", "s", "schedule", "status", "pause", "done", "rm", "10m", "1h30m", "0s", "list"} {
+	for _, bad := range []string{"", "t", "s", "schedule", "status", "pause", "done", "rm", "10m", "1h30m", "0s", "list", "focus"} {
 		if err := checkName(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

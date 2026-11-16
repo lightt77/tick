@@ -10,6 +10,8 @@ tick is a personal, macOS-only tool for one user. It has:
 - countdowns, stopwatches, and a repeating "ticker" (`tick 15m start`)
 - scheduled reminders and habits ("guitar 15m every day at 18:30"), created mostly
   by an LLM through the `/ticker` command
+- a **Focus cube** session: a focus stopwatch plus a repeating lap timer on a ladder
+  of lengths (1m, 5m, ... 1h), with breaks and a logged summary
 - a live terminal view with milliseconds, a menu bar item with controls, and
   custom sounds
 - alerts that fire with no terminal open, by way of a daemon started by launchd
@@ -65,17 +67,18 @@ tray menu clicks ───────┘        │                │   osascr
 | Package | Role | Notes |
 |---|---|---|
 | `timer` | Timer model and state machine | Pure functions of `(timer, now)`. The core of tick. |
+| `focus` | The Focus cube session and its state machine | Pure, like `timer`; see its own section. Imports only `timer` (for `Duration` and `Ringing`). |
 | `schedule` | RRULE subset, multi-rule merge, skips | Wraps `teambition/rrule-go` v1.8.2. |
-| `store` | `state.json` + flock + atomic write | `Load` (shared lock), `Update(fn)` (exclusive; saves only if `fn` succeeds and the bytes changed). |
-| `ops` | Verbs shared by the CLI and the tray | One `store.Update` per call, then run-log lines. |
-| `runlog` | `runs.jsonl` append | Its fields are the future event-ledger schema. |
+| `store` | `state.json` + flock + atomic write | `Load` (shared lock), `Update(fn)` (exclusive; saves only if `fn` succeeds and the bytes changed). Holds `Timers` and the optional `Focus` session. |
+| `ops` | Verbs shared by the CLI and the tray | One `store.Update` per call, then run-log lines. `focus.go` has `FocusStart` and `FocusDo`. |
+| `runlog` | `runs.jsonl` append | Its fields are the future event-ledger schema. An optional `detail` object carries a focus session's breakdown. |
 | `daemon` | The loop | `Step()` is one tick and is exported for tests. |
 | `alert` | Sounds, notifications, ring loops | The `Player` interface is swapped by tests and `TICK_ALERT=log`. |
 | `tray` | Menu bar | `view.go` is pure and tested; `tray.go` draws with `fyne.io/systray`; `policy_darwin.go` is cgo. |
-| `config` | `config.toml` | `Load` → `(Config, timer.Settings)`; `SetSound` rewrites a single line. |
+| `config` | `config.toml` | `Load` → `(Config, timer.Settings)`; `SetSound` rewrites a single line. Also parses `focus_steps` and `focus_breaks` into `Config.Steps` and `Config.Breaks`. |
 | `dashboard` | Data and writer for the static dashboard page | `Build` is pure; `Writer.Update` is called by the daemon each tick; `page.html` is embedded. |
 | `launchd` | LaunchAgent plist and `launchctl` | Label `local.tick.daemon`. |
-| `cli` | cobra commands, `--json` views, live view | `View` is the JSON contract for the LLM. `route.go` is the grammar, `overview.go` is `tick` / `t` / `s` / `-w`, `schedule_prompt.go` is `tick schedule`, `dashboard.go` is `tick dashboard`. |
+| `cli` | cobra commands, `--json` views, live view | `View` is the JSON contract for the LLM. `route.go` is the grammar, `overview.go` is `tick` / `t` / `s` / `-w`, `schedule_prompt.go` is `tick schedule`, `dashboard.go` is `tick dashboard`, `focus.go` is `tick focus`. |
 | `paths` | File locations | `TICK_HOME` moves everything. |
 
 Dependencies are deliberately few: `cobra`, `fyne.io/systray` (needs cgo),
@@ -172,13 +175,72 @@ resume. That keeps RRULE work to about one call per occurrence.
 - **Not expressible:** holidays, "N times a week, any day", randomness, triggers
   other than time, completion-anchored repeats, fixed time zones.
 
+## Focus cube (`internal/focus`)
+
+One session, stored in `state.json` beside the timers (`State.Focus`, `omitempty`).
+It is a composite object on purpose, not a stopwatch plus a ticker linked by a name:
+pause, reset, break and done have to change both clocks atomically, a half-cancelled
+session cannot exist, and the run log gets one line.
+
+- **Model.** `Session{State, Ladder, Breaks, Step, Focus/FocusSince, Lap/LapSince, Laps,
+  BreakCount, BreakTotal, BreakStart/BreakEnds, Seen, Ringing, ...}`. The two clocks use
+  the same trick as `Timer`: a banked value plus a start time, read against `now`.
+  `Focus` is the focus stopwatch (elapsed), `Lap` is the time left in the current lap.
+  The ladder and the break choices are copied from the config when the session starts.
+- **States:** `running`, `paused`, `break`, `breakover`. A finished session is simply
+  removed. A pause that tick made itself has `PausedBy: "sleep"`.
+
+| Verb | Effect |
+|---|---|
+| `pause` / `resume` | Bank or restart both clocks. `resume` also ends a break (the lap continues where it stopped) and answers a finished break. |
+| `up` / `down` | Next or previous rung; the lap restarts. The partial lap stays in the focus time and is **not** counted as a lap. At either end it is a no-op. |
+| `reset` | The lap restarts, its elapsed part comes off the focus time (never below 0), and that rung's `reset` counter goes up. Works while paused (stays paused). |
+| `break [d]` | Bank both clocks, `State = break`, `BreakEnds = now + d`. During a break it restarts the break; time already spent is added to `BreakTotal`, `BreakCount` stays. |
+| `done` / `cancel` | `Summary(now)` becomes one run-log line (`ops.FocusEntry`) and the session is removed. A partial lap counts as focus time, not as a lap. |
+| `silence` | Clears `Ringing` only. |
+
+`up`, `down`, `reset` and `pause` are refused on a break (`resume` first).
+
+**`Advance(now)`** is the only place where time moves, in this order:
+1. A ring past its `Until` is cleared.
+2. **Sleep rule.** A running session not seen for more than `SleepGap` (2 min) is
+   paused at `Seen` (`PausedBy: sleep`, one `EvSleep` event). This covers a sleeping Mac
+   and a daemon that was down; time nobody saw is never focus time.
+3. A lap at zero: all laps that fit are counted (`n = 1 + overshoot / lap`, normally 1),
+   the next lap starts where the last one ended, and one chime is queued
+   (`Ringing.Until == Since`, the same single-play trick as a ticker lap).
+4. A break at its end becomes `breakover` and rings for `AckRing` (12 h) until the user
+   answers. This is the one ring in tick that does not stop by itself after `ring_cap`.
+5. `Seen` is refreshed at most every `SeenEvery` (30 s) while running.
+
+Because of step 5 a running session writes `state.json` about twice a minute; quiet
+ticks in between still write nothing (a test checks it). The dashboard data file
+follows the same writes.
+
+- **Daemon.** `Step` advances the session in the dry run and in the real update.
+  Events: a lap chime is sound only (no banner, a 1m lap would be noise); break over and
+  sleep-pause post a banner (`FocusAnnouncement`). The ring key is `"\x00focus"`, which no
+  timer name can collide with.
+- **Run log.** One line on done or cancel: `tag: "focus"`, `kind: "focus"`, `amount` in
+  focus minutes, `note` ("16 laps, 2 breaks") and `detail` (`laps` per rung with `done` and
+  `reset`, `breaks`, `break_min`). Laps are not logged one by one.
+- **Surfaces.** CLI `tick focus ...` and a flat tray submenu (no nested menus, because
+  nesting in `fyne.io/systray` was not verified on macOS). `focus` is a reserved name.
+  The tray learns the ladder through `SetFocusSteps`, which the daemon calls when it
+  loads the config, so no goroutine reads the daemon's config.
+- **Dashboard.** `Data.Focus` (`FocusView`, the same fixed-point clock fields as
+  `TimerView`) feeds a live card; focus runs in `history` feed a "Focus sessions" table.
+- **State format.** The `focus` field is additive and the file version stays 1. An older
+  daemon would drop it on its next write, so restart the daemon after installing
+  (`tick daemon start`).
+
 ## Daemon (`internal/daemon`) and tray
 
 `Step()` runs every 250 ms:
 1. Reload `config.toml` if its mtime changed. A bad config keeps the previous
    settings. `alert.SetCustomDir(sounds_dir)` runs here.
-2. Load the state and dry-run `Advance` on clones. Most ticks change nothing and
-   **write nothing**, which a test checks.
+2. Load the state and dry-run `Advance` on clones (the timers and the Focus session).
+   Most ticks change nothing and **write nothing**, which a test checks.
 3. If anything changed: inside `store.Update`, advance for real, collect events and
    drop removed timers.
 4. Events go to `runs.jsonl` (done, missed, skipped, cancelled; ticker laps and
@@ -189,10 +251,13 @@ resume. That keeps RRULE work to about one call per occurrence.
 6. `Tray.Update(state, now, defaultSound)`.
 
 **Tray (`internal/tray`):**
-- **Title:** ringing or due first (`⏰ name`, `+N`), else the soonest-finishing
-  countdown, else a running stopwatch (`↑`), else `◷`. A ticker's chime doesn't take
-  the title.
-- **Menu:** sections Due, Running, Paused, Done, Stopwatches, Scheduled. Each timer
+- **Title:** ringing, due or a finished focus break first (`⏰ name`, `⏰ break over`,
+  `+N`), else the Focus cube (`◉ 5m 03:12`, `⏸ 5m 03:12`, `☕ 04:10`), else the
+  soonest-finishing countdown, else a running stopwatch (`↑`), else `◷`. A ticker's chime
+  doesn't take the title.
+- **Menu:** the Focus cube item first (`FocusMenu` for a session, a **Focus cube ▸ Start
+  at …** submenu when idle), then sections Due, Running, Paused, Done, Stopwatches,
+  Scheduled. Each timer
   has a submenu with only the verbs valid in its state (`Rows`). A finished countdown
   offers Restart, Done and Cancel; Done and Cancel both just clear it, because it was
   already logged as `done` when it rang. Then
@@ -270,14 +335,16 @@ choice: no port, no auth, nothing to keep running.
 ## Files and environment
 
 Data: `~/Library/Application Support/tick/` (0700 dir, 0600 files).
-- `state.json`: `{"version":1,"timers":[…]}`, sorted by name. Durations are strings
+- `state.json`: `{"version":1,"timers":[…],"focus":{…}}` (`focus` only while a Focus cube
+  session exists), timers sorted by name. Durations are strings
   like `"15m0s"` (`timer.Duration`). A newer `version` is refused.
 - `state.lock`, `daemon.lock` (pid).
 - `runs.jsonl`: `{"ts","tag","amount","unit":"min","note","outcome","kind"}`.
   These fields were chosen to become the future event ledger, so it can be reused
-  as is.
+  as is. A focus session adds an optional `detail` object (`kind: "focus"`).
 - `config.toml`: see the README. Keys: `sound`, `sounds_dir`, `volume`,
-  `ring_interval`, `ring_cap`, `due_ring`, `grace`. Old `nag_interval` and
+  `ring_interval`, `ring_cap`, `due_ring`, `grace`, `focus_steps` (ascending),
+  `focus_breaks`. Old `nag_interval` and
   `nag_count` keys are ignored.
 - `dashboard.html`, `dashboard-data.js`: generated (see Dashboard). Safe to delete;
   they come back with `tick dashboard` and the daemon.
@@ -306,13 +373,16 @@ LaunchAgent: `~/Library/LaunchAgents/local.tick.daemon.plist`
     kind and checks it; `tick <duration> <verb>` acts on an auto-named countdown
   - verbs: `start` `resume` `pause` `restart` `done` `cancel` `rm` `skip`
   - first-word reserved: `t s schedule status silence sounds dashboard daemon help
-    completion timer stopwatch list`, every verb, and anything `time.ParseDuration`
+    completion timer stopwatch list focus`, every verb, and anything `time.ParseDuration`
     reads (so a name can't be `10m`; `checkName`). Auto-names are the one exception.
   - **Names are one namespace** across timers and stopwatches (`store.Find`), so there
     is no "both kinds" ambiguity; the `t`/`s` prefix is only a check.
   - **Old forms** stay: `tick timer <name> [verb] [duration]` and `tick stopwatch ...`
     (the cobra commands), `tick <dur> start` (the ticker, `actTicker`) and a bare
     verb for the timer named `tick` (`actTickerVerb`).
+  - `tick focus [--json]` and `tick focus start [rung] | pause | resume | up | down | reset
+    | break [length] | done | cancel | silence` (`focus.go`); `--json` prints `FocusView`.
+    A no-op (`resume` on a running session, `down` on the shortest lap) exits 0.
   - Also `status`, `silence`, `sounds`, `dashboard [--no-open]`,
     `daemon [install|uninstall|start] [--no-tray]`, and `schedule` (below).
 - **Root flags:** `-r/--repeat`, `-w/--watch`, `--json`, `--sound`, `--label`, `--until`.
@@ -371,24 +441,36 @@ its rule table. Every rule in it was dry-run against the real binary.
   - `daemon_test`: end-to-end countdown (including cancel on a finished one logging
     nothing more), a late-after-sleep reminder, a pending reminder that never nags,
     quiet ticks writing nothing, dashboard data following changes only, the
-    single-instance lock
+    single-instance lock; for the Focus cube: lap chimes with no banner, quiet ticks until
+    the `seen` refresh, auto-pause with one banner after a sleep, break over ringing until
+    answered then done logging one line, and the ring key not colliding with a timer named
+    `focus`
+  - `focus_test`: the Focus state machine (every verb in every state, lap counting and the
+    single chime, a stall counting every lap, partial-lap rules, reset floor, break restart
+    accumulating time, resume continuing the lap, the sleep rule, `seen` throttling and quiet
+    ticks, the JSON round trip, and counting after a load, where `Laps` comes back nil)
+  - `ops/focus_test`: exclusive start, verbs without a session, one log line on done with
+    its `detail`, cancel, no-ops saving nothing
   - `cli/route_test`: the grammar table (`parse`, its errors, `checkName`)
   - `cli/e2e_test`: runs `tick ...` in-process against a throwaway `TICK_HOME` with
     `TICK_ALERT=log`: the short grammar, auto-named countdowns, refused flag misuse,
-    the old forms, and verbs on a pending reminder
+    the old forms, verbs on a pending reminder, and a whole `tick focus` session including
+    the configured ladder
   - `cli/schedule_prompt_test`: the `tick schedule` conversation and `buildRules`
-  - `dashboard_test`: see Dashboard
+  - `dashboard_test`: see Dashboard (also the Focus view per state and `detail` on history)
   - `tray/view_test`: title priority, rows and verbs (including a finished countdown's
-    Silence, Restart, Done, Cancel), signature stability, sound ordering
+    Silence, Restart, Done, Cancel), signature stability, sound ordering; for the Focus
+    cube: the menu per state, the title rules and the signature
   - `alert_test`: ring timing, deduplication and ordering, `sounds_dir` lookup
     priority, stamp
   - `config_test`: `SetSound` keeps the rest of the file, escapes paths, refuses an
-    invalid result
+    invalid result; the focus lists' defaults, override (without leaking into `Defaults`:
+    the TOML decoder writes into an existing slice in place) and validation
   - `launchd_test`: `plutil -lint` and XML escaping
 - **A manual end-to-end run** without touching real data:
   `TICK_HOME=$(mktemp -d) TICK_ALERT=log tick daemon --no-tray &`, then drive the
   CLI against it.
-- **What tests can't cover:** the tray's visual behaviour, real sound and
+- **What tests can't cover:** the tray's visual behaviour (the Focus submenu included), real sound and
   notification delivery, and the file dialog. Those were checked by hand on the
   user's Mac.
 

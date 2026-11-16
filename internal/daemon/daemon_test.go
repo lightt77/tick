@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lightt77/tick/internal/dashboard"
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/ops"
 	"github.com/lightt77/tick/internal/runlog"
 	"github.com/lightt77/tick/internal/schedule"
@@ -91,6 +92,17 @@ func readLog(t *testing.T, path string) []runlog.Entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+func waitPlays(r *recorder, n int) int {
+	for i := 0; i < 100; i++ {
+		if _, plays := r.snapshot(); plays >= n {
+			return plays
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, plays := r.snapshot()
+	return plays
 }
 
 func waitNotes(r *recorder, n int) []string {
@@ -292,5 +304,155 @@ func TestShort(t *testing.T) {
 		if got := Short(d); got != want {
 			t.Errorf("Short(%v) = %q, want %q", d, got, want)
 		}
+	}
+}
+
+var focusLadder = []time.Duration{time.Minute, 5 * time.Minute}
+var focusBreaks = []time.Duration{5 * time.Minute}
+
+func (r *rig) focus(t *testing.T) *focus.Session {
+	t.Helper()
+	st, err := r.d.Store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Focus
+}
+
+func TestFocusLapChimesWithoutABannerAndKeepsCounting(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.ops.FocusStart(focusLadder, focusBreaks, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	r.now = r.now.Add(time.Minute + time.Second)
+	r.step(t)
+	if waitPlays(r.rec, 1) == 0 {
+		t.Fatal("the lap end made no sound")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if notes, _ := r.rec.snapshot(); len(notes) != 0 {
+		t.Fatalf("a lap chime must not post a banner: %q", notes)
+	}
+	if f := r.focus(t); f.Laps["1m"].Done != 1 || f.State != focus.Running {
+		t.Fatalf("%+v", f)
+	}
+	if len(readLog(t, r.d.RunLog)) != 0 {
+		t.Fatal("laps are not logged one by one")
+	}
+}
+
+func TestFocusQuietTicksWriteNothingUntilTheSeenRefresh(t *testing.T) {
+	r := newRig(t)
+	r.ops.FocusStart(focusLadder, focusBreaks, 1)
+	r.step(t)
+	before, _ := os.Stat(r.d.Store.Path)
+	time.Sleep(10 * time.Millisecond)
+	r.now = r.now.Add(10 * time.Second)
+	r.step(t)
+	if after, _ := os.Stat(r.d.Store.Path); !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("a quiet tick rewrote the state file")
+	}
+	time.Sleep(10 * time.Millisecond)
+	r.now = r.now.Add(25 * time.Second)
+	r.step(t)
+	if after, _ := os.Stat(r.d.Store.Path); after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("seen was never refreshed")
+	}
+}
+
+func TestFocusPausesWhenTheMacSleptAndSaysSo(t *testing.T) {
+	r := newRig(t)
+	r.ops.FocusStart(focusLadder, focusBreaks, 1)
+	r.now = r.now.Add(40 * time.Second)
+	r.step(t)
+	r.now = r.now.Add(6 * time.Hour) // lid closed
+	r.step(t)
+
+	f := r.focus(t)
+	if f.State != focus.Paused || f.PausedBy != focus.PausedBySleep {
+		t.Fatalf("%+v", f)
+	}
+	if got := f.FocusElapsed(r.now); got != 40*time.Second {
+		t.Fatalf("slept time counted as focus: %v", got)
+	}
+	notes := waitNotes(r.rec, 1)
+	if len(notes) != 1 || !strings.HasPrefix(notes[0], "◉ Focus paused | No sign of tick since 08:00") {
+		t.Fatalf("notification %q", notes)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if notes, _ := r.rec.snapshot(); len(notes) != 1 {
+		t.Fatalf("one banner only: %q", notes)
+	}
+}
+
+func TestFocusBreakRingsUntilAnsweredAndDoneLogsOneLine(t *testing.T) {
+	r := newRig(t)
+	r.ops.FocusStart(focusLadder, focusBreaks, 0)
+	r.step(t)
+	r.now = r.now.Add(time.Minute + time.Second)
+	r.step(t) // one lap
+
+	if _, err := r.ops.FocusDo(ops.FocusBreak, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	r.now = r.now.Add(5*time.Minute + time.Second)
+	r.step(t)
+	notes := waitNotes(r.rec, 1)
+	if len(notes) != 1 || !strings.HasPrefix(notes[0], "☕ Break over | ") {
+		t.Fatalf("notification %q", notes)
+	}
+	f := r.focus(t)
+	if f.State != focus.BreakOver || f.Ringing == nil || f.Ringing.Until.Sub(f.Ringing.Since) != focus.AckRing {
+		t.Fatalf("%+v", f)
+	}
+	before := waitPlays(r.rec, 1)
+	if before == 0 {
+		t.Fatal("break over made no sound")
+	}
+
+	// Silence stops the sound but not the question; Resume answers it.
+	if _, err := r.ops.FocusDo(ops.FocusSilence, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	if f := r.focus(t); f.State != focus.BreakOver || f.Ringing != nil {
+		t.Fatalf("after silence: %+v", f)
+	}
+	if _, err := r.ops.FocusDo(ops.FocusResume, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	r.now = r.now.Add(30 * time.Second)
+	if _, err := r.ops.FocusDo(ops.FocusDone, 0); err != nil {
+		t.Fatal(err)
+	}
+	r.step(t)
+	if r.focus(t) != nil {
+		t.Fatal("the session is still there after done")
+	}
+	log := readLog(t, r.d.RunLog)
+	if len(log) != 1 || log[0].Tag != "focus" || log[0].Kind != "focus" || log[0].Outcome != "done" ||
+		log[0].Detail == nil || log[0].Detail.Laps["1m"].Done != 1 || log[0].Detail.Breaks != 1 {
+		t.Fatalf("run log %+v", log)
+	}
+}
+
+func TestFocusRingDoesNotCollideWithATimerNamedFocus(t *testing.T) {
+	r := newRig(t)
+	tm, _ := timer.NewCountdown("focus", time.Minute, false, r.now)
+	r.ops.Create(tm)
+	r.ops.FocusStart(focusLadder, focusBreaks, 0)
+	r.step(t)
+	r.now = r.now.Add(time.Minute + time.Second)
+	r.step(t) // both finish
+	st, _ := r.d.Store.Load()
+	rings := r.d.rings(st, r.now)
+	if _, ok := rings["focus"]; !ok {
+		t.Fatalf("the timer's ring is missing: %v", rings)
+	}
+	if _, ok := rings[focusRing]; !ok {
+		t.Fatalf("the session's ring is missing: %v", rings)
 	}
 }

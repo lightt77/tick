@@ -328,6 +328,85 @@ function renderHabits(root, d) {
   }
 }
 
+function secs(s) {
+  var m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(s) || [];
+  return (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0);
+}
+// "1m ×12 · 5m ×4 (1 reset)", shortest lap first.
+function lapText(laps) {
+  return Object.keys(laps || {}).sort(function (a, b) { return secs(a) - secs(b); }).map(function (k) {
+    var c = laps[k], p = k + " ×" + (c.done || 0);
+    if (c.reset) p += " (" + c.reset + " reset)";
+    return p;
+  }).join(" · ");
+}
+
+function focusCard(f) {
+  var c = el("div", "card" + (f.state === "breakover" ? " attn" : ""));
+  var top = el("div", "top");
+  top.appendChild(el("span", "name", "Focus cube"));
+  var label = f.state === "breakover" ? "break over" : f.state === "break" ? "on a break" : f.state;
+  top.appendChild(el("span", "badge" + (f.state === "breakover" ? " bell" : ""), label));
+  if (f.state === "paused" && f.paused_by === "sleep") top.appendChild(el("span", "badge warn", "the Mac slept"));
+  top.appendChild(el("span", "badge", f.lap + " lap"));
+  c.appendChild(top);
+  var k = el("div", "clock", "");
+  c.appendChild(k);
+  var bar = el("div", "bar"), fill = el("i");
+  bar.appendChild(fill);
+  c.appendChild(bar);
+  var r = el("div", "row"), l = el("span", "l", "focused"), v = el("span", null, "");
+  r.appendChild(l);
+  r.appendChild(v);
+  c.appendChild(r);
+  var tally = lapText(f.laps);
+  var t = el("div", "sub", tally || "no laps finished yet");
+  c.appendChild(t);
+  if (f.breaks) c.appendChild(el("div", "sub", f.breaks + (f.breaks === 1 ? " break" : " breaks") + " · " + minutes(f.break_ms / 60000) + " so far"));
+  live.push(function (now) {
+    var focused = f.started_ms != null ? now - f.started_ms : (f.elapsed_ms || 0);
+    v.textContent = clock(focused);
+    var left = null;
+    if (f.state === "running") left = Math.max(0, f.ends_ms - now);
+    else if (f.state === "paused") left = f.remaining_ms;
+    if (left != null) {
+      k.textContent = clock(left);
+      k.className = "clock" + (f.state === "paused" ? " dim" : "");
+      fill.style.width = (f.lap_ms ? 100 * (1 - left / f.lap_ms) : 0) + "%";
+    } else if (f.state === "break") {
+      k.textContent = "☕ " + clock(f.break_ends_ms - now);
+      k.className = "clock";
+      fill.style.width = "0%";
+    } else {
+      k.textContent = "Over by " + clock(now - f.break_ends_ms);
+      k.className = "clock";
+      fill.style.width = "0%";
+    }
+  });
+  return c;
+}
+
+function renderFocusHistory(root, d) {
+  var runs = (d.history || []).filter(function (r) { return r.kind === "focus"; }).slice(-10).reverse();
+  if (!runs.length) return;
+  section(root, "Focus sessions", runs.length);
+  var wrap = el("div", "scroll"), tb = el("table"), hd = el("tr");
+  ["When", "Outcome", "Focused", "Laps", "Breaks"].forEach(function (h) { hd.appendChild(el("th", null, h)); });
+  tb.appendChild(hd);
+  runs.forEach(function (r) {
+    var tr = el("tr");
+    tr.appendChild(el("td", null, when(r.ms)));
+    tr.appendChild(el("td", r.outcome + "-t", r.outcome));
+    tr.appendChild(el("td", null, r.unit === "min" && r.amount ? minutes(r.amount) : ""));
+    tr.appendChild(el("td", null, r.detail ? lapText(r.detail.laps) : ""));
+    var b = r.detail && r.detail.breaks ? r.detail.breaks + (r.detail.break_min ? " · " + minutes(r.detail.break_min) : "") : "";
+    tr.appendChild(el("td", "sub", b));
+    tb.appendChild(tr);
+  });
+  wrap.appendChild(tb);
+  root.appendChild(wrap);
+}
+
 function renderLog(root, d) {
   var latest = (d.history || []).slice(-30).reverse();
   section(root, "Latest log", latest.length || null);
@@ -370,7 +449,16 @@ function render() {
   if (ringing.length) {
     banner.appendChild(el("div", "banner", "🔔 Ringing: " + ringing.map(function (t) { return t.name; }).join(", ") + "  (tick silence)"));
   }
-  if (!timers.length) root.appendChild(el("div", "empty", "No timers yet."));
+  if (d.focus && d.focus.state === "breakover" && d.focus.ringing) {
+    banner.appendChild(el("div", "banner", "☕ Break over  (tick focus resume, or tick focus done)"));
+  }
+  if (!timers.length && !d.focus) root.appendChild(el("div", "empty", "No timers yet."));
+  if (d.focus) {
+    section(root, "Focus cube");
+    var fg = el("div", "grid");
+    fg.appendChild(focusCard(d.focus));
+    root.appendChild(fg);
+  }
 
   if (attn.length) {
     section(root, "Needs you", attn.length);
@@ -399,6 +487,7 @@ function render() {
     wrap.appendChild(tb);
     root.appendChild(wrap);
   }
+  renderFocusHistory(root, d);
   renderHabits(root, d);
   renderAgenda(root, d);
   renderLog(root, d);

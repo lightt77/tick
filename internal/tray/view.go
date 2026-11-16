@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/ops"
 	"github.com/lightt77/tick/internal/store"
 	"github.com/lightt77/tick/internal/timer"
@@ -29,8 +30,9 @@ func Clock(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", s/60, s%60)
 }
 
-// Title picks what the menu bar shows: something that needs you (ringing or due),
-// else the soonest-finishing countdown, else a running stopwatch, else Idle.
+// Title picks what the menu bar shows: something that needs you (ringing, due, or
+// a finished break), else the Focus cube, else the soonest-finishing countdown,
+// else a running stopwatch, else Idle.
 func Title(st *store.State, now time.Time) string {
 	var attention []string
 	var soonest *timer.Timer
@@ -47,6 +49,9 @@ func Title(st *store.State, now time.Time) string {
 			sw = t
 		}
 	}
+	if st.Focus != nil && st.Focus.State == focus.BreakOver {
+		attention = append(attention, "break over")
+	}
 	switch {
 	case len(attention) > 0:
 		sort.Strings(attention)
@@ -55,12 +60,121 @@ func Title(st *store.State, now time.Time) string {
 			title += fmt.Sprintf(" +%d", len(attention)-1)
 		}
 		return title
+	case st.Focus != nil:
+		return focusTitle(st.Focus, now)
 	case soonest != nil:
 		return soonest.Name + " " + Clock(soonest.Remaining(now))
 	case sw != nil:
 		return sw.Name + " ↑" + Clock(sw.Elapsed(now))
 	}
 	return Idle
+}
+
+// focusTitle is the menu bar text while a Focus cube session is not waiting on you:
+// the lap on its ladder, a pause sign when paused, or the break clock.
+func focusTitle(f *focus.Session, now time.Time) string {
+	lap := focus.Short(f.LapLen()) + " " + Clock(f.LapRemaining(now))
+	switch f.State {
+	case focus.Paused:
+		return "⏸ " + lap
+	case focus.Break:
+		return "☕ " + Clock(f.BreakRemaining(now))
+	}
+	return "◉ " + lap
+}
+
+// FocusAction is one entry of the Focus cube submenu. Dur is the lap length for
+// "start" and the break length for "break".
+type FocusAction struct {
+	Label string
+	Verb  string
+	Dur   time.Duration
+}
+
+// FocusRow is the Focus cube's own item at the top of the menu.
+type FocusRow struct {
+	Text    string
+	Actions []FocusAction
+}
+
+// FocusStarts are the entries of the idle "Focus cube" submenu: one per rung.
+func FocusStarts(steps []time.Duration) []FocusAction {
+	var out []FocusAction
+	for _, d := range steps {
+		out = append(out, FocusAction{Label: "Start at " + focus.Short(d), Verb: "start", Dur: d})
+	}
+	return out
+}
+
+// FocusMenu is the Focus cube row for a running session (nil when there is none).
+// The submenu is flat: no nested menus.
+func FocusMenu(f *focus.Session, now time.Time) *FocusRow {
+	if f == nil {
+		return nil
+	}
+	focused := Clock(f.FocusElapsed(now)) + " focused"
+	var acts []FocusAction
+	act := func(label, verb string, d time.Duration) { acts = append(acts, FocusAction{label, verb, d}) }
+	breaks := func(prefix string) {
+		for _, d := range f.BreakChoices() {
+			act(prefix+" "+focus.Short(d), ops.FocusBreak, d)
+		}
+	}
+	lap := focus.Short(f.LapLen())
+	row := &FocusRow{}
+	switch f.State {
+	case focus.Break:
+		row.Text = fmt.Sprintf("Focus  ☕ break  %s left · %s", Clock(f.BreakRemaining(now)), focused)
+		act("Resume focus", ops.FocusResume, 0)
+		breaks("Restart break")
+	case focus.BreakOver:
+		row.Text = fmt.Sprintf("Focus  break over %s ago · %s", Clock(f.BreakOverBy(now)), focused)
+		if f.Ringing != nil {
+			act("Silence", ops.FocusSilence, 0)
+		}
+		act("Resume focus", ops.FocusResume, 0)
+		breaks("Restart break")
+	default:
+		mark := "◉"
+		if f.State == focus.Paused {
+			mark = "⏸"
+			act("Resume", ops.FocusResume, 0)
+		} else {
+			act("Pause", ops.FocusPause, 0)
+		}
+		row.Text = fmt.Sprintf("Focus  %s %s  %s left · %s", mark, lap, Clock(f.LapRemaining(now)), focused)
+		if f.State == focus.Paused && f.PausedBy == focus.PausedBySleep {
+			row.Text += " · Mac slept"
+		}
+		if r := f.Rungs(); f.Step < len(r)-1 {
+			act("Longer lap ("+focus.Short(r[f.Step+1])+")", ops.FocusUp, 0)
+		}
+		if f.Step > 0 {
+			act("Shorter lap ("+focus.Short(f.Rungs()[f.Step-1])+")", ops.FocusDown, 0)
+		}
+		act("Reset lap", ops.FocusReset, 0)
+		breaks("Break")
+	}
+	act("Done", ops.FocusDone, 0)
+	act("Cancel", ops.FocusCancel, 0)
+	row.Actions = acts
+	return row
+}
+
+// FocusSignature changes only when the Focus items' shape does, not as the clocks tick.
+func FocusSignature(f *FocusRow, steps []time.Duration) string {
+	var b strings.Builder
+	b.WriteString("focus:")
+	if f == nil {
+		for _, a := range FocusStarts(steps) {
+			b.WriteString("|" + a.Label)
+		}
+		return b.String()
+	}
+	for _, a := range f.Actions {
+		b.WriteString("|" + a.Label)
+	}
+	return b.String()
 }
 
 // Action is one entry of a timer's submenu.

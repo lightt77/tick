@@ -14,6 +14,7 @@ import (
 
 	"github.com/lightt77/tick/internal/alert"
 	"github.com/lightt77/tick/internal/config"
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/runlog"
 	"github.com/lightt77/tick/internal/store"
 	"github.com/lightt77/tick/internal/timer"
@@ -91,6 +92,9 @@ func (d *Daemon) loadConfig() {
 		d.ringer.Stop()
 	}
 	d.ringer = alert.NewRinger(d.Player, s.RingInterval)
+	if ft, ok := d.Tray.(interface{ SetFocusSteps([]time.Duration) }); ok {
+		ft.SetFocusSteps(c.Steps)
+	}
 }
 
 func clone(t *timer.Timer) *timer.Timer {
@@ -99,6 +103,17 @@ func clone(t *timer.Timer) *timer.Timer {
 	json.Unmarshal(b, &c)
 	return &c
 }
+
+func cloneFocus(s *focus.Session) *focus.Session {
+	b, _ := json.Marshal(s)
+	var c focus.Session
+	json.Unmarshal(b, &c)
+	return &c
+}
+
+// focusRing is the ring key of the Focus cube session. It starts with a NUL byte,
+// which no timer name can, so it never collides with a timer.
+const focusRing = "\x00focus"
 
 // Step runs one tick.
 func (d *Daemon) Step() error {
@@ -116,15 +131,25 @@ func (d *Daemon) Step() error {
 			break
 		}
 	}
+	if st.Focus != nil {
+		if _, changed := cloneFocus(st.Focus).Advance(now); changed {
+			needWrite = true
+		}
+	}
 	type batch struct {
 		kind timer.Kind
 		evs  []timer.Event
 		t    *timer.Timer
 	}
 	var batches []batch
+	var focusEvs []focus.Event
 	if needWrite {
 		err := d.Store.Update(func(s *store.State) error {
 			batches = nil
+			focusEvs = nil
+			if s.Focus != nil {
+				focusEvs, _ = s.Focus.Advance(now)
+			}
 			var keep []*timer.Timer
 			for _, t := range s.Timers {
 				evs, _, remove := t.Advance(now, d.settings)
@@ -157,6 +182,15 @@ func (d *Daemon) Step() error {
 			}
 		}
 	}
+	for _, ev := range focusEvs {
+		if title, msg, ok := FocusAnnouncement(ev); ok {
+			go func() {
+				if err := d.Player.Notify(title, msg); err != nil {
+					log.Printf("notify: %v", err)
+				}
+			}()
+		}
+	}
 	d.ringer.Reconcile(d.rings(st, now))
 	if d.Tray != nil {
 		d.Tray.Update(st, now, d.cfg.Sound)
@@ -169,31 +203,52 @@ func (d *Daemon) Step() error {
 	return nil
 }
 
+// soundPath resolves a sound name once and remembers it. A name that can't be
+// resolved falls back to Glass (logged); "" means nothing can be played.
+func (d *Daemon) soundPath(who, name string) string {
+	if name == "" {
+		name = d.cfg.Sound
+	}
+	if path, ok := d.sounds[name]; ok {
+		return path
+	}
+	p, err := alert.ResolveSound(name)
+	if err != nil {
+		log.Printf("sound for %s: %v; using Glass", who, err)
+		p, _ = alert.ResolveSound("Glass")
+	}
+	d.sounds[name] = p
+	return p
+}
+
 func (d *Daemon) rings(st *store.State, now time.Time) map[string]alert.Ring {
 	want := map[string]alert.Ring{}
 	for _, t := range st.Timers {
 		if t.Ringing == nil {
 			continue
 		}
-		name := t.Sound
-		if name == "" {
-			name = d.cfg.Sound
+		if path := d.soundPath(t.Name, t.Sound); path != "" {
+			want[t.Name] = alert.Ring{Sound: path, Volume: d.cfg.Volume, Since: t.Ringing.Since, Until: t.Ringing.Until}
 		}
-		path, ok := d.sounds[name]
-		if !ok {
-			p, err := alert.ResolveSound(name)
-			if err != nil {
-				log.Printf("sound for %s: %v; using Glass", t.Name, err)
-				p, _ = alert.ResolveSound("Glass")
-			}
-			d.sounds[name], path = p, p
+	}
+	if f := st.Focus; f != nil && f.Ringing != nil {
+		if path := d.soundPath("focus", ""); path != "" {
+			want[focusRing] = alert.Ring{Sound: path, Volume: d.cfg.Volume, Since: f.Ringing.Since, Until: f.Ringing.Until}
 		}
-		if path == "" {
-			continue
-		}
-		want[t.Name] = alert.Ring{Sound: path, Volume: d.cfg.Volume, Since: t.Ringing.Since, Until: t.Ringing.Until}
 	}
 	return want
+}
+
+// FocusAnnouncement is the notification for a Focus cube event, if it gets one. A
+// lap chime is sound only: a banner every minute would be noise.
+func FocusAnnouncement(ev focus.Event) (title, msg string, ok bool) {
+	switch ev.Kind {
+	case focus.EvBreakOver:
+		return "☕ Break over", "Back to it from the menu bar, or: tick focus resume (tick focus break 5m for more break)", true
+	case focus.EvSleep:
+		return "◉ Focus paused", "No sign of tick since " + ev.At.Local().Format("15:04") + " (the Mac slept?), so the session paused there. Resume from the menu bar or: tick focus resume", true
+	}
+	return "", "", false
 }
 
 // Announcement is the notification for an event, if it gets one.

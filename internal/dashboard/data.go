@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/runlog"
 	"github.com/lightt77/tick/internal/store"
 	"github.com/lightt77/tick/internal/timer"
@@ -37,6 +38,7 @@ type Data struct {
 	GeneratedMs int64        `json:"generated_ms"`
 	AgendaDays  int          `json:"agenda_days"`
 	Timers      []TimerView  `json:"timers"`
+	Focus       *FocusView   `json:"focus,omitempty"` // the Focus cube session, if one is running
 	Agenda      []AgendaItem `json:"agenda"`
 	History     []Run        `json:"history"`
 }
@@ -69,6 +71,28 @@ type TimerView struct {
 	CreatedMs        int64  `json:"created_ms"`
 }
 
+// FocusView is the Focus cube session as the page needs it, with the same clock
+// idea as TimerView: the page draws the readings from these fixed points in time.
+type FocusView struct {
+	State    string `json:"state"` // running, paused, break, breakover
+	PausedBy string `json:"paused_by,omitempty"`
+	LapMs    int64  `json:"lap_ms"`
+	Lap      string `json:"lap"` // the rung, like "5m"
+
+	EndsMs      *int64 `json:"ends_ms,omitempty"`      // running: the lap reaches zero
+	RemainingMs *int64 `json:"remaining_ms,omitempty"` // paused or on a break: what is left of the lap
+	StartedMs   *int64 `json:"started_ms,omitempty"`   // running: now - focus time
+	ElapsedMs   *int64 `json:"elapsed_ms,omitempty"`   // not running: focus time
+
+	BreakEndsMs *int64 `json:"break_ends_ms,omitempty"` // on a break, or the moment it ended
+
+	Laps        map[string]runlog.LapCount `json:"laps,omitempty"`
+	Breaks      int                        `json:"breaks,omitempty"`
+	BreakMs     int64                      `json:"break_ms,omitempty"` // time spent on breaks so far
+	Ringing     bool                       `json:"ringing,omitempty"`
+	StartedAtMs int64                      `json:"started_at_ms"`
+}
+
 // AgendaItem is one timer's occurrences on one local day.
 type AgendaItem struct {
 	Day   string  `json:"day"` // YYYY-MM-DD, local
@@ -86,6 +110,8 @@ type Run struct {
 	Amount  float64 `json:"amount,omitempty"`
 	Unit    string  `json:"unit,omitempty"`
 	Note    string  `json:"note,omitempty"`
+
+	Detail *runlog.Detail `json:"detail,omitempty"` // a focus session's per-lap breakdown
 }
 
 func ms(t time.Time) int64 { return t.UnixMilli() }
@@ -106,6 +132,7 @@ func Build(st *store.State, now time.Time, runs []runlog.Entry, source string, p
 	d := Data{Version: dataVersion, Source: source, PID: pid, GeneratedMs: ms(now), AgendaDays: AgendaDays,
 		Timers: []TimerView{}, Agenda: []AgendaItem{}, History: []Run{}}
 	end := now.Add(AgendaDays * 24 * time.Hour)
+	d.Focus = focusView(st.Focus, now)
 	for _, t := range st.Timers {
 		d.Timers = append(d.Timers, view(t, now))
 		if t.Schedule == nil || t.Suspended {
@@ -126,9 +153,39 @@ func Build(st *store.State, now time.Time, runs []runlog.Entry, source string, p
 	})
 	for _, e := range runs {
 		d.History = append(d.History, Run{Ms: ms(e.TS), Tag: e.Tag, Outcome: e.Outcome, Kind: e.Kind,
-			Amount: e.Amount, Unit: e.Unit, Note: e.Note})
+			Amount: e.Amount, Unit: e.Unit, Note: e.Note, Detail: e.Detail})
 	}
 	return d
+}
+
+func focusView(f *focus.Session, now time.Time) *FocusView {
+	if f == nil {
+		return nil
+	}
+	sum := f.Summary(now)
+	v := &FocusView{State: string(f.State), PausedBy: f.PausedBy, LapMs: f.LapLen().Milliseconds(), Lap: focus.Short(f.LapLen()),
+		Breaks: sum.Breaks, BreakMs: sum.BreakTotal.Milliseconds(), Ringing: f.Ringing != nil, StartedAtMs: ms(f.Started)}
+	if len(sum.Laps) > 0 {
+		v.Laps = map[string]runlog.LapCount{}
+		for k, c := range sum.Laps {
+			v.Laps[k] = runlog.LapCount{Done: c.Done, Reset: c.Reset}
+		}
+	}
+	switch f.State {
+	case focus.Running:
+		if at, ok := f.LapEnds(); ok {
+			e := ms(at)
+			v.EndsMs = &e
+		}
+		start := ms(now.Add(-f.FocusElapsed(now)))
+		v.StartedMs = &start
+	case focus.Paused:
+		v.RemainingMs, v.ElapsedMs = dur(f.LapRemaining(now)), dur(f.FocusElapsed(now))
+	default: // break, breakover
+		v.RemainingMs, v.ElapsedMs = dur(f.LapRemaining(now)), dur(f.FocusElapsed(now))
+		v.BreakEndsMs = msp(f.BreakEnds)
+	}
+	return v
 }
 
 func view(t *timer.Timer, now time.Time) TimerView {

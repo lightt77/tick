@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/runlog"
 	"github.com/lightt77/tick/internal/schedule"
 	"github.com/lightt77/tick/internal/store"
@@ -287,5 +288,63 @@ func TestPageLoadsDataSafely(t *testing.T) {
 	}
 	if strings.Contains(p, "http://") || strings.Contains(p, "https://") {
 		t.Fatal("the page must not reach the network")
+	}
+}
+
+func TestBuildFocusSessionClocksPerState(t *testing.T) {
+	f, _ := focus.New([]time.Duration{time.Minute, 5 * time.Minute}, []time.Duration{5 * time.Minute}, 1, now)
+	f.Advance(now.Add(10 * time.Second))
+	st := &store.State{Focus: f}
+
+	at := now.Add(90 * time.Second)
+	v := Build(st, at, nil, SourceDaemon, 1).Focus
+	if v == nil || v.State != "running" || v.Lap != "5m" || v.LapMs != 300000 {
+		t.Fatalf("running: %+v", v)
+	}
+	if v.EndsMs == nil || *v.EndsMs != now.Add(5*time.Minute).UnixMilli() || v.StartedMs == nil || *v.StartedMs != now.UnixMilli() {
+		t.Fatalf("running clocks: ends=%v started=%v", v.EndsMs, v.StartedMs)
+	}
+
+	f.Pause(at)
+	v = Build(st, at, nil, SourceDaemon, 1).Focus
+	if v.State != "paused" || v.EndsMs != nil || v.StartedMs != nil || *v.RemainingMs != 210000 || *v.ElapsedMs != 90000 {
+		t.Fatalf("paused: %+v", v)
+	}
+
+	f.Resume(at)
+	f.TakeBreak(at, 5*time.Minute)
+	v = Build(st, at.Add(time.Minute), nil, SourceDaemon, 1).Focus
+	if v.State != "break" || v.BreakEndsMs == nil || *v.BreakEndsMs != at.Add(5*time.Minute).UnixMilli() || v.Breaks != 1 {
+		t.Fatalf("break: %+v", v)
+	}
+	over := at.Add(6 * time.Minute)
+	f.Advance(over)
+	v = Build(st, over, nil, SourceDaemon, 1).Focus
+	if v.State != "breakover" || !v.Ringing || *v.BreakEndsMs != at.Add(5*time.Minute).UnixMilli() || v.BreakMs != 360000 {
+		t.Fatalf("break over: %+v", v)
+	}
+	if Build(&store.State{}, at, nil, SourceDaemon, 1).Focus != nil {
+		t.Fatal("no session, no focus field")
+	}
+}
+
+func TestBuildFocusHistoryCarriesTheBreakdown(t *testing.T) {
+	runs := []runlog.Entry{
+		{TS: now, Tag: "pasta", Outcome: "done", Kind: "timer", Amount: 10, Unit: "min"},
+		{TS: now, Tag: "focus", Outcome: "done", Kind: "focus", Amount: 84.5, Unit: "min", Note: "16 laps, 2 breaks",
+			Detail: &runlog.Detail{Laps: map[string]runlog.LapCount{"1m": {Done: 12}, "5m": {Done: 4, Reset: 1}}, Breaks: 2, BreakMin: 18}},
+	}
+	d := Build(&store.State{}, now, runs, SourceDaemon, 1)
+	if len(d.History) != 2 || d.History[0].Detail != nil || d.History[1].Kind != "focus" {
+		t.Fatalf("%+v", d.History)
+	}
+	b, _ := json.Marshal(d.History[1])
+	for _, want := range []string{`"detail":{"laps":{"1m":{"done":12},"5m":{"done":4,"reset":1}},"breaks":2,"break_min":18}`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("%s lacks %s", b, want)
+		}
+	}
+	if b, _ := json.Marshal(d.History[0]); strings.Contains(string(b), "detail") {
+		t.Fatalf("a timer line gained a detail: %s", b)
 	}
 }

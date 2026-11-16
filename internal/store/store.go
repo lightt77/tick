@@ -13,15 +13,19 @@ import (
 	"sort"
 	"syscall"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/timer"
 )
 
 const version = 1
 
-// State is the whole file.
+// State is the whole file. Focus is the Focus cube session, if one is running; at
+// most one exists. The field is additive, so the file version stays 1 (an older
+// daemon would drop it on its next write, so restart the daemon after installing).
 type State struct {
 	Version int            `json:"version"`
 	Timers  []*timer.Timer `json:"timers"`
+	Focus   *focus.Session `json:"focus,omitempty"`
 }
 
 // Find returns the timer with that name, or nil.

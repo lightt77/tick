@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/lightt77/tick/internal/focus"
 	"github.com/lightt77/tick/internal/timer"
 )
 
@@ -103,5 +105,41 @@ func TestCorruptFileIsAnError(t *testing.T) {
 	}
 	if err := s.Update(func(*State) error { return nil }); err == nil {
 		t.Fatal("update over a corrupt file must fail, not overwrite it")
+	}
+}
+
+func TestFocusSessionSurvivesAndStaysOutOfTheWayWhenAbsent(t *testing.T) {
+	s := newStore(t)
+	now := time.Now().Truncate(time.Second)
+	if err := s.Update(func(st *State) error {
+		tm, _ := timer.NewCountdown("pasta", time.Minute, false, now)
+		st.Timers = append(st.Timers, tm)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(s.Path); strings.Contains(string(b), "focus") {
+		t.Fatalf("a state without a session must not mention focus:\n%s", b)
+	}
+
+	sess, err := focus.New([]time.Duration{time.Minute, 5 * time.Minute}, []time.Duration{5 * time.Minute}, 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(func(st *State) error { st.Focus = sess; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Load()
+	if err != nil || st.Focus == nil || st.Focus.LapLen() != 5*time.Minute || st.Find("pasta") == nil {
+		t.Fatalf("round trip: %+v %v", st.Focus, err)
+	}
+	if st.Focus.LapRemaining(now.Add(time.Minute)) != 4*time.Minute {
+		t.Fatalf("the clocks came back wrong: %+v", st.Focus)
+	}
+	if err := s.Update(func(st *State) error { st.Focus = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.Load(); st.Focus != nil {
+		t.Fatal("the session was not cleared")
 	}
 }
