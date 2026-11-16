@@ -193,7 +193,9 @@ resume. That keeps RRULE work to about one call per occurrence.
   countdown, else a running stopwatch (`↑`), else `◷`. A ticker's chime doesn't take
   the title.
 - **Menu:** sections Due, Running, Paused, Done, Stopwatches, Scheduled. Each timer
-  has a submenu with only the verbs valid in its state (`Rows`). Then
+  has a submenu with only the verbs valid in its state (`Rows`). A finished countdown
+  offers Restart, Done and Cancel; Done and Cancel both just clear it, because it was
+  already logged as `done` when it rang. Then
   **Sound ▸**, **Silence all** and **Quit tick**.
 - **Rebuild only on a shape change.** `Signature(rows, sound+stamp)` excludes the
   ticking texts, so the menu is rebuilt only when its shape, the default sound or a

@@ -131,7 +131,8 @@ func TestCountdownEndToEnd(t *testing.T) {
 		t.Fatal("no sound played")
 	}
 
-	// cancel from the "CLI" stops the ring and logs it.
+	// cancel (or done) from the CLI or the menu clears the finished countdown and
+	// stops the ring. It was already logged as done, so nothing more is logged.
 	if _, err := r.ops.Apply("pasta", "", ops.Cancel, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +140,9 @@ func TestCountdownEndToEnd(t *testing.T) {
 	st, _ = r.d.Store.Load()
 	if st.Find("pasta") != nil {
 		t.Fatal("cancel did not delete")
+	}
+	if log := readLog(t, r.d.RunLog); len(log) != 1 {
+		t.Fatalf("cancel on a finished countdown logged again: %+v", log)
 	}
 	if r.tray.updates == 0 {
 		t.Fatal("tray never updated")

@@ -134,7 +134,7 @@ func Rows(st *store.State, now time.Time) []Row {
 		case t.State == timer.Done:
 			r.Section = "Done"
 			r.Text = t.Name + "  finished"
-			r.Actions = []Action{{"Restart", ops.Restart}, {"Clear", ops.Done}}
+			r.Actions = []Action{{"Restart", ops.Restart}, {"Done", ops.Done}, {"Cancel", ops.Cancel}}
 		case t.State == timer.Scheduled:
 			r.Section = "Scheduled"
 			switch {

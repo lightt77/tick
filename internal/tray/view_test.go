@@ -48,6 +48,23 @@ func TestTitlePriority(t *testing.T) {
 	}
 }
 
+func TestFinishedCountdownRowOffersDoneAndCancel(t *testing.T) {
+	c := countdown("pasta", time.Minute, t0)
+	c.Advance(t0.Add(time.Minute), timer.DefaultSettings)
+	rows := Rows(&store.State{Timers: []*timer.Timer{c}}, t0.Add(time.Minute))
+	if len(rows) != 1 || rows[0].Section != "Done" {
+		t.Fatalf("rows %+v", rows)
+	}
+	var labels []string
+	for _, a := range rows[0].Actions {
+		labels = append(labels, a.Label)
+	}
+	// Silence first while it rings, then the same verbs as the other rows.
+	if got := strings.Join(labels, ","); got != "Silence,Restart,Done,Cancel" {
+		t.Fatalf("actions %s", got)
+	}
+}
+
 func TestTickerChimeDoesNotTakeTheTitle(t *testing.T) {
 	tk, _ := timer.NewCountdown("tick", 15*time.Minute, true, t0)
 	tk.Advance(t0.Add(15*time.Minute), timer.DefaultSettings)
