@@ -75,7 +75,7 @@ tray menu clicks ───────┘        │                │   osascr
 | `config` | `config.toml` | `Load` → `(Config, timer.Settings)`; `SetSound` rewrites a single line. |
 | `dashboard` | Data and writer for the static dashboard page | `Build` is pure; `Writer.Update` is called by the daemon each tick; `page.html` is embedded. |
 | `launchd` | LaunchAgent plist and `launchctl` | Label `local.tick.daemon`. |
-| `cli` | cobra commands, `--json` views, live view | `View` is the JSON contract for the LLM. |
+| `cli` | cobra commands, `--json` views, live view | `View` is the JSON contract for the LLM. `route.go` is the grammar, `overview.go` is `tick` / `t` / `s` / `-w`, `schedule_prompt.go` is `tick schedule`, `dashboard.go` is `tick dashboard`. |
 | `paths` | File locations | `TICK_HOME` moves everything. |
 
 Dependencies are deliberately few: `cobra`, `fyne.io/systray` (needs cgo),
@@ -361,13 +361,25 @@ its rule table. Every rule in it was dry-run against the real binary.
   injected (`Now func() time.Time` in `ops` and `daemon`; an explicit `now` in
   `timer`).
 - **Tests to know about:**
-  - `timer_test`: 15 state-machine scenarios
+  - `timer_test`: the state machine, one test per scenario (pause and resume, ticker
+    laps, stopwatch, due and grace, done, cancel and skip on schedules, pause-until,
+    reminders without a duration)
   - `schedule_test`: rule shapes, validation, speed
   - `store_test`: 40 concurrent writers with nothing lost, corrupt-file refusal
-  - `daemon_test`: end-to-end countdown and a late-after-sleep reminder, quiet ticks
-    writing nothing, the single-instance lock
-  - `tray/view_test`: title priority, rows and verbs, signature stability, sound
-    ordering
+  - `runlog_test`: `Since` filters by time, skips junk lines, and treats a missing file
+    as empty
+  - `daemon_test`: end-to-end countdown (including cancel on a finished one logging
+    nothing more), a late-after-sleep reminder, a pending reminder that never nags,
+    quiet ticks writing nothing, dashboard data following changes only, the
+    single-instance lock
+  - `cli/route_test`: the grammar table (`parse`, its errors, `checkName`)
+  - `cli/e2e_test`: runs `tick ...` in-process against a throwaway `TICK_HOME` with
+    `TICK_ALERT=log`: the short grammar, auto-named countdowns, refused flag misuse,
+    the old forms, and verbs on a pending reminder
+  - `cli/schedule_prompt_test`: the `tick schedule` conversation and `buildRules`
+  - `dashboard_test`: see Dashboard
+  - `tray/view_test`: title priority, rows and verbs (including a finished countdown's
+    Silence, Restart, Done, Cancel), signature stability, sound ordering
   - `alert_test`: ring timing, deduplication and ordering, `sounds_dir` lookup
     priority, stamp
   - `config_test`: `SetSound` keeps the rest of the file, escapes paths, refuses an
@@ -386,9 +398,9 @@ its rule table. Every rule in it was dry-run against the real binary.
   PATH. Then `tick daemon start`, **because the running daemon keeps the old binary
   until restarted.** There is no Makefile, on purpose.
 - **Repo:** this is a nested Git repo in the user's Obsidian vault at
-  `01tech/projects/tick`. The vault's `pushToObsidian` script commits and pushes
-  nested repos once they have a remote; the intended remote is a private
-  `lightt77/tick`.
+  `01tech/projects/tick`. Its remote is `origin`, `git@github.com:lightt77/tick.git`
+  (private), and `main` tracks it. The vault's `pushToObsidian` script commits and
+  pushes nested repos that have a remote.
 - **Commits and pushes are the user's.** Don't commit, push, install the
   LaunchAgent or change their shell config without an explicit request.
 - **`~/.zshrc` is the real shell config.** The copy in
