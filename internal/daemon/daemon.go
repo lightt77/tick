@@ -290,12 +290,12 @@ func quote(name string) string {
 // Short formats a duration compactly: 15m, 1h30m, 45s.
 func Short(d time.Duration) string {
 	s := d.Round(time.Second).String()
-	s = strings.TrimSuffix(s, "0s")
+	// Drop a zero unit only after a bigger one: 15m0s -> 15m, but 10s stays 10s.
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
 	if strings.HasSuffix(s, "h0m") {
 		s = strings.TrimSuffix(s, "0m")
-	}
-	if s == "" {
-		return "0s"
 	}
 	return s
 }

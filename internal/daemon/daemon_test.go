@@ -300,6 +300,7 @@ func TestSingleInstanceLock(t *testing.T) {
 func TestShort(t *testing.T) {
 	for d, want := range map[time.Duration]string{
 		15 * time.Minute: "15m", 90 * time.Minute: "1h30m", 2 * time.Hour: "2h", 45 * time.Second: "45s", 0: "0s",
+		10 * time.Second: "10s", 30 * time.Second: "30s", 90 * time.Second: "1m30s", time.Minute: "1m", time.Hour: "1h",
 	} {
 		if got := Short(d); got != want {
 			t.Errorf("Short(%v) = %q, want %q", d, got, want)
